@@ -88,6 +88,7 @@ async def start_swarm(
     
     initial_state = {
         "task_prompt":      final_prompt,
+        "user_brief":       task_prompt,
         "guidelines_path":  guidelines_path,
         "execution_plan":   [],
         "deliverables":     {},
@@ -166,6 +167,7 @@ async def provide_feedback(
         # sees the new instructions in its 'Continuous Manager' loop.
         if fb_type == "global":
             update_payload["task_prompt"] = user_feedback
+            update_payload["user_brief"] = feedback
 
         swarm_app.update_state(config, update_payload)
         

@@ -99,3 +99,16 @@ def test_clean_previous_output():
     assert clean_previous_output("Slogan: Brew the future!") == "Slogan: Brew the future!"
     assert clean_previous_output("") == ""
 
+def test_user_brief_in_worker_state(mock_get_llm_client):
+    from swarm import assign_workers
+    state = {
+        "task_prompt": "Task brief\n\nAttached Document Content:\nPDF TEXT",
+        "user_brief": "Task brief",
+        "guidelines_path": "brand_guidelines.txt",
+        "execution_plan": [{"agent_role": "Copywriter", "task_description": "Write slogan", "action_type": "NEW_HIRE"}],
+        "deliverables": {}
+    }
+    sends = assign_workers(state)
+    assert len(sends) == 1
+    assert sends[0].arg["task_prompt"] == "Task brief"
+

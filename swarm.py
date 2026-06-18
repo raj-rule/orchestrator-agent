@@ -54,6 +54,7 @@ def clean_previous_output(output: str) -> str:
 class SwarmState(TypedDict):
     # ── Core inputs ──────────────────────────────────────────────
     task_prompt: str          # The raw user request sent from the frontend
+    user_brief: str           # The user request without attached file content
     guidelines_path: str      # Path to the brand-guidelines file
 
     # ── Orchestrator outputs ─────────────────────────────────────
@@ -546,7 +547,7 @@ def assign_workers(state: SwarmState) -> list[Send]:
             {
                 "agent_role":       task["agent_role"],
                 "task_description": task["task_description"],
-                "task_prompt":      state["task_prompt"],
+                "task_prompt":      state.get("user_brief", state["task_prompt"]),
                 "guidelines_path":  state.get("guidelines_path", "brand_guidelines.txt"),
                 "feedback":         state.get("feedback", ""),
                 "feedback_type":    state.get("feedback_type", ""),
@@ -580,7 +581,7 @@ def route_feedback(state: SwarmState):
                 {
                     "agent_role": target,
                     "task_description": task_desc,
-                    "task_prompt": state.get("task_prompt", ""),
+                    "task_prompt": state.get("user_brief", state["task_prompt"]),
                     "guidelines_path": state.get("guidelines_path", "brand_guidelines.txt"),
                     "feedback": state.get("feedback", ""),
                     "feedback_type": "targeted",
