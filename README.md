@@ -76,6 +76,7 @@ CriticAI/
 │
 ├── server.py              # FastAPI server (API endpoints, header extraction)
 ├── swarm.py               # LangGraph swarm engine & dynamic LLM factory
+├── guardrails.py          # Input safety & prompt injection validation filters
 ├── _test_orchestrator.py  # Local smoke test verification script
 ├── requirements.txt       # Python backend dependencies
 ├── start.bat              # Out-of-the-box Windows runner script
