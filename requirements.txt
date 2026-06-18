@@ -10,3 +10,4 @@ langchain-google-genai>=1.0.0
 langgraph>=0.0.30
 langchain-tavily>=0.1.0
 langgraph-checkpoint-sqlite>=2.0.0
+python-multipart>=0.0.9
