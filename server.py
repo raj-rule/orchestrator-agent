@@ -25,12 +25,22 @@ async def extract_text(file: UploadFile) -> str:
         return text
     return ""
 
-app = FastAPI(title="CriticAI Swarm API")
+app = FastAPI(
+    title="CriticAI Swarm API",
+    description="Backend API for orchestrating multi-agent LLM swarms using FastAPI and LangGraph."
+)
 
-# Configure CORS to allow requests from the React frontend (Vite defaults to 5173)
+# Secure CORS: Allow local development origins only (no wildcards)
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
