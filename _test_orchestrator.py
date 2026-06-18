@@ -5,6 +5,10 @@ Run: .\\venv\\Scripts\\python.exe _test_orchestrator.py
 from dotenv import load_dotenv
 load_dotenv()
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 from swarm import app
 
 initial_state = {
@@ -23,7 +27,12 @@ initial_state = {
     "final_outputs": [],
 }
 
-config = {"configurable": {"thread_id": "phase2_test_001"}}
+config = {
+    "configurable": {
+        "thread_id": "phase2_test_001",
+        "llm_provider": "groq"
+    }
+}
 
 print("\n>> Invoking dynamic swarm (Phase 2)...\n")
 result = app.invoke(initial_state, config=config)

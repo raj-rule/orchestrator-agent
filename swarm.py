@@ -13,6 +13,8 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -109,7 +111,7 @@ llm_with_tools = llm.bind_tools(tools_list)
 
 
 # ==========================================
-# 3. GROQ ORCHESTRATOR LLM
+# 3. GROQ ORCHESTRATOR LLM (Legacy globals)
 # ==========================================
 orchestrator_llm = ChatGroq(
     model="llama-3.3-70b-versatile",
@@ -117,20 +119,62 @@ orchestrator_llm = ChatGroq(
     max_retries=3
 )
 
-# ── Hybrid Worker LLM (Local / Free) ────────────────────────────
-# All dynamically spawned worker_nodes use this local model via LM Studio,
-# keeping API costs to zero for the execution layer.
 local_llm = ChatOpenAI(
     base_url="http://localhost:1234/v1",
     api_key="lm-studio",
     temperature=0.7,
 )
 
+# ── Dynamic Model Client Factory ──────────────────────────────────
+def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False) -> Any:
+    """
+    Dynamically instantiates the LLM client based on the provided configuration.
+    If provider and keys are missing from config, it falls back to environment variables.
+    """
+    configurable = config.get("configurable", {}) if config else {}
+    provider = configurable.get("llm_provider", "").lower()
+    
+    # Retrieve keys from config
+    groq_key = configurable.get("groq_api_key") or os.getenv("GROQ_API_KEY")
+    gemini_key = configurable.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+    openrouter_key = configurable.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")
+
+    if provider == "groq" and groq_key:
+        model = "llama-3.3-70b-versatile" if is_orchestrator else "llama-3.1-8b-instant"
+        return ChatGroq(model=model, api_key=groq_key, temperature=0.2 if is_orchestrator else 0.7)
+        
+    elif provider == "gemini" and gemini_key:
+        model = "gemini-1.5-flash"
+        return ChatGoogleGenerativeAI(model=model, google_api_key=gemini_key, temperature=0.2 if is_orchestrator else 0.7)
+        
+    elif provider == "openrouter" and openrouter_key:
+        # OpenRouter free tier or standard models
+        model = "google/gemini-2.0-flash-exp:free" if is_orchestrator else "meta-llama/llama-3-8b-instruct:free"
+        return ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=openrouter_key,
+            model=model,
+            temperature=0.2 if is_orchestrator else 0.7
+        )
+    
+    # Fallbacks to env variables directly
+    if os.getenv("GROQ_API_KEY"):
+        model = "llama-3.3-70b-versatile" if is_orchestrator else "llama-3.1-8b-instant"
+        return ChatGroq(model=model, api_key=os.getenv("GROQ_API_KEY"), temperature=0.2 if is_orchestrator else 0.7)
+    elif os.getenv("GEMINI_API_KEY"):
+        return ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.getenv("GEMINI_API_KEY"), temperature=0.2 if is_orchestrator else 0.7)
+    
+    # Default backups
+    if is_orchestrator:
+        return orchestrator_llm
+    else:
+        return local_llm
+
 
 # ==========================================
 # 4. ORCHESTRATOR NODE  (Gemini-powered)
 # ==========================================
-def orchestrator_node(state: SwarmState) -> dict[str, Any]:
+def orchestrator_node(state: SwarmState, config: RunnableConfig = None) -> dict[str, Any]:
     """
     Phase 1 – Groq Orchestrator (Continuous Manager).
     """
@@ -179,9 +223,10 @@ Correct Action: The request is about copy. You already have a Copywriter. You MU
         HumanMessage(content=human_content),
     ]
 
-    print("\n[ORCHESTRATOR] Calling Groq to generate execution plan...")
+    print("\n[ORCHESTRATOR] Calling model to generate execution plan...")
     
-    structured_llm = orchestrator_llm.with_structured_output(OrchestratorPlan)
+    dyn_orchestrator_llm = get_llm_client(config, is_orchestrator=True)
+    structured_llm = dyn_orchestrator_llm.with_structured_output(OrchestratorPlan)
     try:
         result = structured_llm.invoke(messages)
         
@@ -249,9 +294,9 @@ assignment. Structure your response with clear headings and bullet points where
 appropriate. Be specific — avoid vague platitudes.
 """
 
-def worker_node(state: WorkerState) -> dict[str, Any]:
+def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, Any]:
     """
-    Phase 2 – Generic Gemini Worker.
+    Phase 2 – Generic Worker.
 
     Receives a WorkerState via Send, executes its assigned task, and returns
     its output merged into the main SwarmState's `deliverables` dict.
@@ -300,17 +345,17 @@ def worker_node(state: WorkerState) -> dict[str, Any]:
     if len(task_prompt) > 2000:
         system_content += "\n\nWARNING: The user request contains extensive document content. Please be concise and focus only on your specific assignment."
 
-    # Workers use the local LLM (LM Studio) — zero API cost per task.
-    # Plain text / markdown output; no JSON binding needed.
+    # Workers use dynamic LLM client
+    dyn_worker_llm = get_llm_client(config, is_orchestrator=False)
 
     messages = [
         SystemMessage(content=system_content),
         HumanMessage(content=f"Execute your assignment now. Be detailed and specific."),
     ]
 
-    print(f"\n[WORKER:{role}] Starting task... (local LLM)")
+    print(f"\n[WORKER:{role}] Starting task... (dynamic LLM)")
     try:
-        response = local_llm.invoke(messages)
+        response = dyn_worker_llm.invoke(messages)
         output   = response.content.strip()
         print(f"[WORKER:{role}] Done. ({len(output)} chars)")
         status = "completed"
