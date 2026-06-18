@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, PenTool, Image as ImageIcon, ArrowUp, Paperclip, Bot, User, CheckCircle, RefreshCw, ArrowRight, Plus, Menu, X, MessageSquare, Trash2, Terminal, Code, Activity, Briefcase, FileText } from 'lucide-react';
+import { Search, PenTool, Image as ImageIcon, ArrowUp, Paperclip, Bot, User, CheckCircle, RefreshCw, ArrowRight, Plus, Menu, X, MessageSquare, Trash2, Terminal, Code, Activity, Briefcase, FileText, Settings, Eye, EyeOff } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -72,6 +72,17 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [agentStatuses, setAgentStatuses] = useState({});
+
+  // LLM Key states
+  const [provider, setProvider] = useState(() => localStorage.getItem('swarm_provider') || 'groq');
+  const [groqKey, setGroqKey] = useState(() => localStorage.getItem('swarm_groq_key') || '');
+  const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('swarm_gemini_key') || '');
+  const [openrouterKey, setOpenrouterKey] = useState(() => localStorage.getItem('swarm_openrouter_key') || '');
+
+  // Visibility toggles for keys
+  const [showGroqKey, setShowGroqKey] = useState(false);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showOpenrouterKey, setShowOpenrouterKey] = useState(false);
   
   // Workspace State
   const [activeView, setActiveView] = useState('main'); // 'main' or agentRole string
@@ -188,7 +199,13 @@ export default function App() {
 
       const response = await fetch('http://localhost:8000/api/start', {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: {
+          'X-LLM-Provider': provider,
+          'X-Groq-API-Key': groqKey,
+          'X-Gemini-API-Key': geminiKey,
+          'X-OpenRouter-API-Key': openrouterKey,
+        }
       });
 
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
@@ -289,7 +306,13 @@ export default function App() {
 
       const response = await fetch('http://localhost:8000/api/feedback', {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: {
+          'X-LLM-Provider': provider,
+          'X-Groq-API-Key': groqKey,
+          'X-Gemini-API-Key': geminiKey,
+          'X-OpenRouter-API-Key': openrouterKey,
+        }
       });
 
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
@@ -357,9 +380,18 @@ export default function App() {
                 <Briefcase size={16} className="text-zinc-400" />
                 CriticAI Workspace
               </h1>
-              <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-500 hover:text-zinc-300 transition-colors">
-                <X size={18} />
-              </button>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => setShowSettings(true)}
+                  className="p-1 text-zinc-500 hover:text-zinc-250 transition-colors rounded hover:bg-zinc-800"
+                  title="LLM Settings"
+                >
+                  <Settings size={16} />
+                </button>
+                <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <X size={18} />
+                </button>
+              </div>
             </div>
             
             <div className="p-3">
@@ -734,6 +766,163 @@ export default function App() {
             </div>
           </motion.div>
         )}
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-zinc-900 border border-white/10 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col"
+            >
+              <div className="p-6 border-b border-white/5 flex items-center justify-between">
+                <h3 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+                  <Settings size={18} className="text-zinc-400" />
+                  LLM Provider Settings
+                </h3>
+                <button 
+                  onClick={() => setShowSettings(false)}
+                  className="text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6 flex-1 overflow-y-auto max-h-[70vh]">
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Default LLM Provider</label>
+                  <div className="grid grid-cols-3 gap-3">
+                    {['groq', 'gemini', 'openrouter'].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => setProvider(p)}
+                        className={`px-4 py-3 rounded-xl border text-xs font-medium uppercase tracking-wider transition-all ${
+                          provider === p 
+                            ? 'bg-white text-black border-white shadow-md' 
+                            : 'bg-zinc-950 border-white/5 text-zinc-400 hover:text-zinc-200 hover:border-white/10'
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <hr className="border-white/5" />
+
+                <div className="space-y-4">
+                  {/* Groq Key */}
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <label className="text-xs font-medium text-zinc-300">Groq API Key</label>
+                      <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors underline">Get Key</a>
+                    </div>
+                    <div className="relative flex items-center">
+                      <input 
+                        type={showGroqKey ? 'text' : 'password'}
+                        value={groqKey}
+                        onChange={(e) => {
+                          setGroqKey(e.target.value);
+                          localStorage.setItem('swarm_groq_key', e.target.value);
+                        }}
+                        placeholder="gsk_..."
+                        className="w-full bg-zinc-950 border border-white/5 focus:border-zinc-500 rounded-xl px-4 py-2.5 text-sm outline-none placeholder-zinc-700 text-zinc-200 pr-10"
+                      />
+                      <button 
+                        type="button"
+                        onClick={() => setShowGroqKey(!showGroqKey)}
+                        className="absolute right-3 text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        {showGroqKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Gemini Key */}
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <label className="text-xs font-medium text-zinc-300">Gemini API Key</label>
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors underline">Get Key</a>
+                    </div>
+                    <div className="relative flex items-center">
+                      <input 
+                        type={showGeminiKey ? 'text' : 'password'}
+                        value={geminiKey}
+                        onChange={(e) => {
+                          setGeminiKey(e.target.value);
+                          localStorage.setItem('swarm_gemini_key', e.target.value);
+                        }}
+                        placeholder="AIzaSy..."
+                        className="w-full bg-zinc-950 border border-white/5 focus:border-zinc-500 rounded-xl px-4 py-2.5 text-sm outline-none placeholder-zinc-700 text-zinc-200 pr-10"
+                      />
+                      <button 
+                        type="button"
+                        onClick={() => setShowGeminiKey(!showGeminiKey)}
+                        className="absolute right-3 text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        {showGeminiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* OpenRouter Key */}
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <label className="text-xs font-medium text-zinc-300">OpenRouter API Key</label>
+                      <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors underline">Get Key</a>
+                    </div>
+                    <div className="relative flex items-center">
+                      <input 
+                        type={showOpenrouterKey ? 'text' : 'password'}
+                        value={openrouterKey}
+                        onChange={(e) => {
+                          setOpenrouterKey(e.target.value);
+                          localStorage.setItem('swarm_openrouter_key', e.target.value);
+                        }}
+                        placeholder="sk-or-v1-..."
+                        className="w-full bg-zinc-950 border border-white/5 focus:border-zinc-500 rounded-xl px-4 py-2.5 text-sm outline-none placeholder-zinc-700 text-zinc-200 pr-10"
+                      />
+                      <button 
+                        type="button"
+                        onClick={() => setShowOpenrouterKey(!showOpenrouterKey)}
+                        className="absolute right-3 text-zinc-500 hover:text-zinc-300 transition-colors"
+                      >
+                        {showOpenrouterKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-950/50 border border-white/5 rounded-xl p-4 text-[11px] leading-relaxed text-zinc-400 space-y-1">
+                  <p className="font-semibold text-zinc-300">🔒 Secure Local Storage</p>
+                  <p>Your API keys are stored only in your browser's LocalStorage and are sent to the local server running at `localhost:8000` via headers. They never touch any remote database.</p>
+                </div>
+              </div>
+
+              <div className="p-4 border-t border-white/5 bg-zinc-900/40 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.setItem('swarm_provider', provider);
+                    setShowSettings(false);
+                  }}
+                  className="px-4 py-2 bg-white hover:bg-zinc-200 text-black text-xs font-semibold rounded-lg transition-colors shadow-sm"
+                >
+                  Save Settings
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       </div>
     </div>
