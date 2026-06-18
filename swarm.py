@@ -629,33 +629,59 @@ def route_art_director(state: SwarmState):
 # 7. EXPORTER NODE  (legacy pipeline)
 # ==========================================
 def export_deliverable_node(state: SwarmState):
+    deliverables = state.get("deliverables", {})
+    task = state.get("task_prompt", "Project Brief")
+    plan = state.get("execution_plan", [])
+
     slogan = state.get("slogan_draft", "").strip()
     image_prompt = state.get("image_prompt_draft", "").strip()
 
-    if not slogan and not image_prompt:
-        return {"final_outputs": ["Error: No draft found to export."]}
-
-    task = state.get("task_prompt", "Campaign")
-    clean_draft = (
-        f"# 🎯 Campaign Output\n\n"
-        f"**Brief:** {task}\n\n"
-        f"---\n\n"
-        f"## ✍️ Slogan\n\n"
-        f"{slogan}\n\n"
-        f"---\n\n"
-        f"## 🖼️ Image Generation Prompt\n\n"
-        f"{image_prompt}\n"
-    )
+    if not deliverables and not slogan and not image_prompt:
+        return {"final_outputs": ["Error: No outputs found to export."]}
 
     os.makedirs("outputs", exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"outputs/campaign_output_{timestamp}.md"
+
+    if deliverables:
+        # Dynamic Swarm (Phase 2) format
+        clean_draft = []
+        clean_draft.append(f"# 🎯 CriticAI Project Swarm Report")
+        clean_draft.append(f"**Brief:** {task}\n")
+        clean_draft.append(f"---\n")
+        
+        if plan:
+            clean_draft.append(f"## 🤖 Swarm Execution Plan")
+            for idx, t in enumerate(plan, 1):
+                clean_draft.append(f"{idx}. **[{t.get('agent_role')}]**: {t.get('task_description')}")
+            clean_draft.append(f"\n---\n")
+
+        clean_draft.append(f"## 📂 Agent Deliverables")
+        for role, content in deliverables.items():
+            clean_draft.append(f"\n### 👤 Agent: {role}")
+            clean_draft.append(f"{content}")
+            clean_draft.append(f"\n---\n")
+
+        report_content = "\n".join(clean_draft)
+        filename = f"outputs/project_output_{timestamp}.md"
+    else:
+        # Legacy Creative Pipeline (Phase 1) format
+        report_content = (
+            f"# 🎯 Campaign Output\n\n"
+            f"**Brief:** {task}\n\n"
+            f"---\n\n"
+            f"## ✍️ Slogan\n\n"
+            f"{slogan}\n\n"
+            f"---\n\n"
+            f"## 🖼️ Image Generation Prompt\n\n"
+            f"{image_prompt}\n"
+        )
+        filename = f"outputs/campaign_output_{timestamp}.md"
 
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(clean_draft)
+        f.write(report_content)
 
     print(f"\n[EXPORT] Exported to: {filename}")
-    return {"final_outputs": [f"Successfully exported draft to {filename}"]}
+    return {"final_outputs": [f"Successfully exported deliverables to {filename}"]}
 
 
 # ==========================================
