@@ -5,6 +5,11 @@ from pydantic import BaseModel, Field
 from typing import Optional, Literal
 import PyPDF2
 import io
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tracers.context import tracing_v2_enabled

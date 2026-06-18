@@ -4,6 +4,10 @@ import os
 import re
 import sqlite3
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 import time
 from typing import Annotated, Any, List, TypedDict, Literal
 from pydantic import BaseModel, Field
