@@ -42,6 +42,15 @@ def _merge_dicts(a: dict, b: dict) -> dict:
     return {**a, **b}
 
 
+def clean_previous_output(output: str) -> str:
+    """Strips reviewer feedback appended to deliverables from previous turns."""
+    if not output:
+        return ""
+    # Split by the reviewer feedback markdown indicator and keep the prefix
+    parts = re.split(r"\n\n\*Reviewer Feedback \(Internal Revision \d+\):\*", output)
+    return parts[0].strip()
+
+
 class SwarmState(TypedDict):
     # ── Core inputs ──────────────────────────────────────────────
     task_prompt: str          # The raw user request sent from the frontend
@@ -81,6 +90,9 @@ class WorkerState(TypedDict):
     feedback: str
     feedback_type: str
     previous_output: str
+    critic_feedback: str
+    internal_revision_count: int
+    approved_by_critic: bool
 
 
 # ==========================================
@@ -301,7 +313,7 @@ appropriate. Be specific — avoid vague platitudes.
 
 def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, Any]:
     """
-    Phase 2 – Generic Worker.
+    Phase 2 – Generic Worker with Dynamic Tool Loop.
 
     Receives a WorkerState via Send, executes its assigned task, and returns
     its output merged into the main SwarmState's `deliverables` dict.
@@ -313,6 +325,7 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
     feedback    = state.get("feedback", "")
     feedback_type = state.get("feedback_type", "")
     previous_output = state.get("previous_output", "")
+    critic_feedback = state.get("critic_feedback", "")
 
     # Optionally inject brand guidelines as hard constraints
     guidelines_text = ""
@@ -347,21 +360,56 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
         else:
             system_content += f"\n\nRevise your previous draft based on this global feedback:\n{feedback}"
 
+    if critic_feedback:
+        system_content += f"\n\nCRITICAL INTERNAL REVIEW FEEDBACK:\n{critic_feedback}\n\nYou MUST revise your previous draft to address the specific critiques listed above."
+
     if len(task_prompt) > 2000:
         system_content += "\n\nWARNING: The user request contains extensive document content. Please be concise and focus only on your specific assignment."
 
     # Workers use dynamic LLM client
     dyn_worker_llm = get_llm_client(config, is_orchestrator=False)
+    
+    # Bind tools from global tools_list
+    tools_map = {t.name: t for t in tools_list}
+    llm_with_tools = dyn_worker_llm.bind_tools(tools_list)
 
     messages = [
         SystemMessage(content=system_content),
-        HumanMessage(content=f"Execute your assignment now. Be detailed and specific."),
+        HumanMessage(content=f"Execute your assignment now. Be detailed and specific. Use tools if needed."),
     ]
 
-    print(f"\n[WORKER:{role}] Starting task... (dynamic LLM)")
+    print(f"\n[WORKER:{role}] Starting task... (dynamic LLM + tools)")
     try:
-        response = dyn_worker_llm.invoke(messages)
-        output   = response.content.strip()
+        # Tool execution loop (up to 3 tool call turns)
+        for turn in range(3):
+            response = llm_with_tools.invoke(messages)
+            messages.append(response)
+            
+            if hasattr(response, 'tool_calls') and response.tool_calls:
+                print(f"[WORKER:{role}] Tool calls detected: {[tc['name'] for tc in response.tool_calls]}")
+                for tool_call in response.tool_calls:
+                    name = tool_call['name']
+                    tool_to_run = tools_map.get(name)
+                    if tool_to_run:
+                        try:
+                            result = tool_to_run.invoke(tool_call['args'])
+                        except Exception as e:
+                            result = f"Error running tool {name}: {e}"
+                    else:
+                        result = f"Error: Tool {name} not found."
+                    
+                    from langchain_core.messages import ToolMessage
+                    messages.append(ToolMessage(content=str(result), name=name, tool_call_id=tool_call['id']))
+            else:
+                break
+        
+        # If the last message has tool calls or is not text, request final response
+        if not messages[-1].content or (hasattr(messages[-1], 'tool_calls') and messages[-1].tool_calls):
+            final_response = dyn_worker_llm.invoke(messages)
+            output = final_response.content.strip()
+        else:
+            output = messages[-1].content.strip()
+
         print(f"[WORKER:{role}] Done. ({len(output)} chars)")
         status = "completed"
     except Exception as e:
@@ -369,12 +417,117 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
         output = "⚠️ **System Notice:** This agent encountered an error or timed out due to hardware constraints. Please request a targeted revision to try again."
         status = "error"
 
-    # Return targets SwarmState.deliverables — _merge_dicts reducer handles
-    # concurrent writes from all parallel workers without data loss.
+    # Return updates to WorkerState and SwarmState
     return {
+        "previous_output": output,
         "deliverables": {role: output},
-        "agent_statuses": {role: status}
+        "agent_statuses": {role: status},
+        "approved_by_critic": False
     }
+
+
+# ==========================================
+# 5a. CRITIC LAYER & ROUTING
+# ==========================================
+def critic_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, Any]:
+    role = state["agent_role"]
+    task_desc = state["task_description"]
+    task_prompt = state["task_prompt"]
+    output = state["previous_output"]
+    revision_count = state.get("internal_revision_count", 0)
+
+    # If the output is empty or contains system notice, skip review
+    if not output or "System Notice" in output:
+        return {
+            "approved_by_critic": True,
+            "critic_feedback": "",
+            "deliverables": {role: output},
+            "agent_statuses": {role: "error"}
+        }
+
+    critic_prompt = f"""You are the Lead Quality Assurance and Critic Agent for an AI Swarm.
+Your job is to critically review the deliverable produced by the '{role}' agent and determine if it is complete, matches the task requirements, and is high-quality.
+
+Original Project Brief:
+"{task_prompt}"
+
+Agent Role: {role}
+Agent's Specific Task:
+"{task_desc}"
+
+Deliverable to Review:
+<deliverable>
+{output}
+</deliverable>
+
+CRITICAL RULES FOR EVALUATION:
+1. Thoroughness: Does the deliverable fully address the specific task? If it is too short, generic, or has placeholders, reject it.
+2. Alignment: Does it respect the project brief and guidelines?
+3. Actionability: Is it professional and immediately usable?
+
+If the deliverable passes your checks and is high quality, respond with:
+APPROVED
+
+If it requires improvements, start your response with:
+REVISE
+Followed by a numbered list of clear, specific, and constructive instructions for the agent to implement. Do not be overly harsh, but do not accept low-quality or incomplete work.
+"""
+
+    dyn_critic_llm = get_llm_client(config, is_orchestrator=True)
+    messages = [
+        SystemMessage(content=critic_prompt),
+        HumanMessage(content="Evaluate the deliverable. Start with either 'APPROVED' or 'REVISE'."),
+    ]
+    
+    print(f"\n[CRITIC:{role}] Reviewing deliverable...")
+    try:
+        response = dyn_critic_llm.invoke(messages)
+        review = response.content.strip()
+        print(f"[CRITIC:{role}] Review complete:\n{review[:200]}...")
+    except Exception as e:
+        print(f"[CRITIC:{role}] Review failed: {e}. Defaulting to APPROVED.")
+        review = "APPROVED"
+
+    if review.startswith("APPROVED") or "approved" in review.lower()[:15]:
+        return {
+            "approved_by_critic": True,
+            "critic_feedback": "",
+            "deliverables": {role: output},
+            "agent_statuses": {role: "completed"}
+        }
+    else:
+        # Extract revision feedback
+        feedback = review
+        if feedback.startswith("REVISE"):
+            feedback = feedback[len("REVISE"):].strip()
+            if feedback.startswith(":") or feedback.startswith("-"):
+                feedback = feedback[1:].strip()
+        
+        print(f"[CRITIC:{role}] Rejected (Revision count: {revision_count + 1})")
+        return {
+            "approved_by_critic": False,
+            "critic_feedback": feedback,
+            "internal_revision_count": revision_count + 1,
+            # Render the intermediate draft + critique so it can be seen
+            "deliverables": {role: f"{output}\n\n*Reviewer Feedback (Internal Revision {revision_count + 1}):*\n{feedback}"},
+            "agent_statuses": {role: "working"}
+        }
+
+
+def route_critic(state: WorkerState):
+    approved = state.get("approved_by_critic", False)
+    revision_count = state.get("internal_revision_count", 0)
+    role = state.get("agent_role", "Worker")
+    
+    if approved or revision_count >= 2:
+        if revision_count >= 2 and not approved:
+            print(f"[CRITIC ROUTER:{role}] Max internal revision limit reached. Proceeding to HITL.")
+        else:
+            print(f"[CRITIC ROUTER:{role}] Approved! Proceeding to HITL.")
+        return "hitl"
+    else:
+        print(f"[CRITIC ROUTER:{role}] Loop back to worker for revision.")
+        return "worker_node"
 
 
 # ==========================================
@@ -397,7 +550,10 @@ def assign_workers(state: SwarmState) -> list[Send]:
                 "guidelines_path":  state.get("guidelines_path", "brand_guidelines.txt"),
                 "feedback":         state.get("feedback", ""),
                 "feedback_type":    state.get("feedback_type", ""),
-                "previous_output":  state.get("deliverables", {}).get(task["agent_role"], "")
+                "previous_output":  clean_previous_output(state.get("deliverables", {}).get(task["agent_role"], "")),
+                "critic_feedback":   "",
+                "internal_revision_count": 0,
+                "approved_by_critic": False
             },
         )
         for task in state["execution_plan"]
@@ -428,7 +584,10 @@ def route_feedback(state: SwarmState):
                     "guidelines_path": state.get("guidelines_path", "brand_guidelines.txt"),
                     "feedback": state.get("feedback", ""),
                     "feedback_type": "targeted",
-                    "previous_output": state.get("deliverables", {}).get(target, "")
+                    "previous_output": clean_previous_output(state.get("deliverables", {}).get(target, "")),
+                    "critic_feedback": "",
+                    "internal_revision_count": 0,
+                    "approved_by_critic": False
                 }
             )
         ]
@@ -713,6 +872,7 @@ tool_node = ToolNode(tools_list)
 # ── Register nodes ────────────────────────────────────────────────
 workflow.add_node("orchestrator", orchestrator_node)
 workflow.add_node("worker_node",  worker_node)        # Phase 2: dynamic workers
+workflow.add_node("critic_node",  critic_node)
 workflow.add_node("copywriter",   copywriter_node)
 workflow.add_node("art_director", art_director_node)
 workflow.add_node("reviewer",     reviewer_node)
@@ -738,8 +898,15 @@ workflow.add_conditional_edges(
     ["worker_node"],   # declare the possible target node(s)
 )
 
-# Each worker writes back to deliverables, then the graph converges at hitl
-workflow.add_edge("worker_node", "hitl")
+# Worker draft goes to internal critic node
+workflow.add_edge("worker_node", "critic_node")
+
+# Critic node conditional routing: revise goes to worker_node, approved goes to hitl
+workflow.add_conditional_edges(
+    "critic_node",
+    route_critic,
+    ["worker_node", "hitl"]
+)
 
 workflow.add_conditional_edges(
     "hitl",
