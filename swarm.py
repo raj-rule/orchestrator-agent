@@ -57,6 +57,7 @@ class SwarmState(TypedDict):
     agent_statuses: Annotated[dict, _merge_dicts]
     feedback_type: str
     target_agent: str
+    guardrail_status: str
 
     # ── Legacy creative-pipeline fields (Phase 1 backward-compat) ─
     # Kept so server.py can still read slogan_draft / image_prompt_draft
@@ -169,6 +170,10 @@ def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False)
         return orchestrator_llm
     else:
         return local_llm
+
+
+# ── Guardrails Safety Verification Node ────────────────────────────
+from guardrails import guardrail_node, route_guardrail
 
 
 # ==========================================
@@ -714,9 +719,17 @@ workflow.add_node("reviewer",     reviewer_node)
 workflow.add_node("tools",        tool_node)
 workflow.add_node("hitl",         hitl_node)
 workflow.add_node("exporter",     export_deliverable_node)
+workflow.add_node("guardrail",    guardrail_node)
 
 # ── Phase 2 active wiring ─────────────────────────────────────────
-workflow.set_entry_point("orchestrator")
+workflow.set_entry_point("guardrail")
+
+# Guardrail conditional routing: safe goes to orchestrator, flagged goes to hitl
+workflow.add_conditional_edges(
+    "guardrail",
+    route_guardrail,
+    ["orchestrator", "hitl"]
+)
 
 # Fan-out: orchestrator → N parallel worker_node invocations via Send
 workflow.add_conditional_edges(
