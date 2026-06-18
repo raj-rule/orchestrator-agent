@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -56,10 +56,22 @@ async def start_swarm(
     session_id: str = Form(...),
     task_prompt: str = Form(...),
     guidelines_path: Optional[str] = Form("brand_guidelines.txt"),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    x_llm_provider: Optional[str] = Header(None, alias="X-LLM-Provider"),
+    x_groq_api_key: Optional[str] = Header(None, alias="X-Groq-API-Key"),
+    x_gemini_api_key: Optional[str] = Header(None, alias="X-Gemini-API-Key"),
+    x_openrouter_api_key: Optional[str] = Header(None, alias="X-OpenRouter-API-Key"),
 ):
     """Initializes the graph and runs until the first HITL interrupt."""
-    config = {"configurable": {"thread_id": session_id}}
+    config = {
+        "configurable": {
+            "thread_id": session_id,
+            "llm_provider": x_llm_provider,
+            "groq_api_key": x_groq_api_key,
+            "gemini_api_key": x_gemini_api_key,
+            "openrouter_api_key": x_openrouter_api_key
+        }
+    }
     
     file_content = await extract_text(file) if file else ""
     final_prompt = f"User Request: {task_prompt}\n\nAttached Document Content:\n{file_content}" if file_content else task_prompt
@@ -97,10 +109,22 @@ async def provide_feedback(
     feedback: str = Form(...),
     type: str = Form(...),
     target_agent: Optional[str] = Form(None),
-    file: UploadFile = File(None)
+    file: UploadFile = File(None),
+    x_llm_provider: Optional[str] = Header(None, alias="X-LLM-Provider"),
+    x_groq_api_key: Optional[str] = Header(None, alias="X-Groq-API-Key"),
+    x_gemini_api_key: Optional[str] = Header(None, alias="X-Gemini-API-Key"),
+    x_openrouter_api_key: Optional[str] = Header(None, alias="X-OpenRouter-API-Key"),
 ):
     """Injects user feedback and resumes the graph."""
-    config = {"configurable": {"thread_id": session_id}}
+    config = {
+        "configurable": {
+            "thread_id": session_id,
+            "llm_provider": x_llm_provider,
+            "groq_api_key": x_groq_api_key,
+            "gemini_api_key": x_gemini_api_key,
+            "openrouter_api_key": x_openrouter_api_key
+        }
+    }
     state_snapshot = swarm_app.get_state(config)
     
     if not state_snapshot.next:
