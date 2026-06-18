@@ -83,6 +83,13 @@ export default function App() {
   const [showGroqKey, setShowGroqKey] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showOpenrouterKey, setShowOpenrouterKey] = useState(false);
+
+  // Telemetry Key states
+  const [langsmithEnabled, setLangsmithEnabled] = useState(() => localStorage.getItem('swarm_langsmith_enabled') === 'true');
+  const [langsmithKey, setLangsmithKey] = useState(() => localStorage.getItem('swarm_langsmith_api_key') || '');
+  const [langsmithProject, setLangsmithProject] = useState(() => localStorage.getItem('swarm_langsmith_project') || 'CriticAI');
+  const [langsmithEndpoint, setLangsmithEndpoint] = useState(() => localStorage.getItem('swarm_langsmith_endpoint') || 'https://api.smith.langchain.com');
+  const [showLangsmithKey, setShowLangsmithKey] = useState(false);
   
   // Workspace State
   const [activeView, setActiveView] = useState('main'); // 'main' or agentRole string
@@ -205,6 +212,10 @@ export default function App() {
           'X-Groq-API-Key': groqKey,
           'X-Gemini-API-Key': geminiKey,
           'X-OpenRouter-API-Key': openrouterKey,
+          'X-Langsmith-Tracing': langsmithEnabled ? 'true' : 'false',
+          'X-Langsmith-API-Key': langsmithKey,
+          'X-Langsmith-Project': langsmithProject,
+          'X-Langsmith-Endpoint': langsmithEndpoint,
         }
       });
 
@@ -312,6 +323,10 @@ export default function App() {
           'X-Groq-API-Key': groqKey,
           'X-Gemini-API-Key': geminiKey,
           'X-OpenRouter-API-Key': openrouterKey,
+          'X-Langsmith-Tracing': langsmithEnabled ? 'true' : 'false',
+          'X-Langsmith-API-Key': langsmithKey,
+          'X-Langsmith-Project': langsmithProject,
+          'X-Langsmith-Endpoint': langsmithEndpoint,
         }
       });
 
@@ -899,6 +914,78 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                </div>
+
+                <hr className="border-white/5" />
+
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">LangSmith Tracing</label>
+                    <input 
+                      type="checkbox" 
+                      checked={langsmithEnabled} 
+                      onChange={(e) => {
+                        setLangsmithEnabled(e.target.checked);
+                        localStorage.setItem('swarm_langsmith_enabled', e.target.checked);
+                      }}
+                      className="accent-white h-4 w-4 rounded border-zinc-700 bg-zinc-900"
+                    />
+                  </div>
+
+                  {langsmithEnabled && (
+                    <>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-zinc-300">LangSmith API Key</label>
+                        <div className="relative flex items-center">
+                          <input 
+                            type={showLangsmithKey ? 'text' : 'password'}
+                            value={langsmithKey}
+                            onChange={(e) => {
+                              setLangsmithKey(e.target.value);
+                              localStorage.setItem('swarm_langsmith_api_key', e.target.value);
+                            }}
+                            placeholder="lsv2_pt_..."
+                            className="w-full bg-zinc-950 border border-white/5 focus:border-zinc-500 rounded-xl px-4 py-2.5 text-sm outline-none placeholder-zinc-700 text-zinc-200 pr-10"
+                          />
+                          <button 
+                            type="button" 
+                            onClick={() => setShowLangsmithKey(!showLangsmithKey)}
+                            className="absolute right-3 text-zinc-500 hover:text-zinc-300 transition-colors"
+                          >
+                            {showLangsmithKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-zinc-300">LangSmith Project</label>
+                        <input 
+                          type="text"
+                          value={langsmithProject}
+                          onChange={(e) => {
+                            setLangsmithProject(e.target.value);
+                            localStorage.setItem('swarm_langsmith_project', e.target.value);
+                          }}
+                          placeholder="CriticAI"
+                          className="w-full bg-zinc-950 border border-white/5 focus:border-zinc-500 rounded-xl px-4 py-2.5 text-sm outline-none placeholder-zinc-700 text-zinc-200"
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-zinc-300">LangSmith Endpoint</label>
+                        <input 
+                          type="text"
+                          value={langsmithEndpoint}
+                          onChange={(e) => {
+                            setLangsmithEndpoint(e.target.value);
+                            localStorage.setItem('swarm_langsmith_endpoint', e.target.value);
+                          }}
+                          placeholder="https://api.smith.langchain.com"
+                          className="w-full bg-zinc-950 border border-white/5 focus:border-zinc-500 rounded-xl px-4 py-2.5 text-sm outline-none placeholder-zinc-700 text-zinc-200"
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div className="bg-zinc-950/50 border border-white/5 rounded-xl p-4 text-[11px] leading-relaxed text-zinc-400 space-y-1">

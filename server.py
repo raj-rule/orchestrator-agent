@@ -7,6 +7,7 @@ import PyPDF2
 import io
 
 from langchain_core.messages import HumanMessage
+from langchain_core.tracers.context import tracing_v2_enabled
 from swarm import app as swarm_app
 
 async def extract_text(file: UploadFile) -> str:
@@ -71,6 +72,10 @@ async def start_swarm(
     x_groq_api_key: Optional[str] = Header(None, alias="X-Groq-API-Key"),
     x_gemini_api_key: Optional[str] = Header(None, alias="X-Gemini-API-Key"),
     x_openrouter_api_key: Optional[str] = Header(None, alias="X-OpenRouter-API-Key"),
+    x_langsmith_tracing: Optional[str] = Header(None, alias="X-Langsmith-Tracing"),
+    x_langsmith_api_key: Optional[str] = Header(None, alias="X-Langsmith-API-Key"),
+    x_langsmith_project: Optional[str] = Header(None, alias="X-Langsmith-Project"),
+    x_langsmith_endpoint: Optional[str] = Header(None, alias="X-Langsmith-Endpoint"),
 ):
     """Initializes the graph and runs until the first HITL interrupt."""
     config = {
@@ -101,7 +106,15 @@ async def start_swarm(
     }
     
     # Start the graph (it will pause since we compiled with interrupt_before=["hitl"])
-    swarm_app.invoke(initial_state, config=config)
+    if x_langsmith_tracing == "true" and x_langsmith_api_key:
+        with tracing_v2_enabled(
+            project_name=x_langsmith_project or "CriticAI",
+            api_key=x_langsmith_api_key,
+            endpoint=x_langsmith_endpoint or "https://api.smith.langchain.com"
+        ):
+            swarm_app.invoke(initial_state, config=config)
+    else:
+        swarm_app.invoke(initial_state, config=config)
     
     # Get the current state snapshot after interrupt
     state_snapshot = swarm_app.get_state(config)
@@ -125,6 +138,10 @@ async def provide_feedback(
     x_groq_api_key: Optional[str] = Header(None, alias="X-Groq-API-Key"),
     x_gemini_api_key: Optional[str] = Header(None, alias="X-Gemini-API-Key"),
     x_openrouter_api_key: Optional[str] = Header(None, alias="X-OpenRouter-API-Key"),
+    x_langsmith_tracing: Optional[str] = Header(None, alias="X-Langsmith-Tracing"),
+    x_langsmith_api_key: Optional[str] = Header(None, alias="X-Langsmith-API-Key"),
+    x_langsmith_project: Optional[str] = Header(None, alias="X-Langsmith-Project"),
+    x_langsmith_endpoint: Optional[str] = Header(None, alias="X-Langsmith-Endpoint"),
 ):
     """Injects user feedback and resumes the graph."""
     config = {
@@ -172,7 +189,15 @@ async def provide_feedback(
         swarm_app.update_state(config, update_payload)
         
     # Resume the graph
-    swarm_app.invoke(None, config=config)
+    if x_langsmith_tracing == "true" and x_langsmith_api_key:
+        with tracing_v2_enabled(
+            project_name=x_langsmith_project or "CriticAI",
+            api_key=x_langsmith_api_key,
+            endpoint=x_langsmith_endpoint or "https://api.smith.langchain.com"
+        ):
+            swarm_app.invoke(None, config=config)
+    else:
+        swarm_app.invoke(None, config=config)
     
     # Get the new state snapshot after it pauses again (or finishes)
     new_snapshot = swarm_app.get_state(config)
