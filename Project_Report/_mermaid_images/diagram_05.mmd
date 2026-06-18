@@ -1,0 +1,60 @@
+flowchart TD
+    subgraph Browser["🌐 Browser — React + Vite (Port 5173)"]
+        UI_Sidebar["Left Sidebar<br>Session Manager<br>Agent Navigator"]
+        UI_Chat["Main Chat View<br>Orchestrator Messages<br>Approve / Global Revise"]
+        UI_Canvas["Focused Canvas<br>Per-Agent Markdown<br>Targeted Revision Input"]
+        UI_Loading["LoadingSkeleton<br>Real-time Agent<br>Status Badges"]
+        LocalStorage["localStorage<br>Session History<br>Message Persistence"]
+        
+        UI_Sidebar <--> UI_Chat
+        UI_Chat <--> UI_Canvas
+        UI_Chat --> UI_Loading
+        UI_Chat --- LocalStorage
+    end
+
+    subgraph FastAPI["⚡ FastAPI Server — Python (Port 8000)"]
+        EP_Start["POST /api/start<br>Accepts: session_id, task_prompt<br>file (pdf/txt)<br>Returns: deliverables, plan, statuses"]
+        EP_Feedback["POST /api/feedback<br>Accepts: session_id, feedback<br>type, target_agent<br>Calls: update_state + invoke(None)"]
+        EP_Session["GET /api/sessions/id<br>Returns: current state snapshot"]
+        FileParser["extract_text()<br>PyPDF2 for .pdf<br>decode() for .txt"]
+        CORS["CORSMiddleware<br>localhost:5173 + wildcard"]
+        
+        EP_Start --> FileParser
+        EP_Feedback --> FileParser
+    end
+
+    subgraph LangGraph["🕸️ LangGraph Engine — swarm.py"]
+        StateGraph["StateGraph(SwarmState)<br>Compiled with SqliteSaver<br>interrupt_before=['hitl']"]
+        Orch["orchestrator_node()<br>Groq API Call<br>Pydantic Validation<br>Produces execution_plan"]
+        AssignFn["assign_workers()<br>Conditional Edge<br>Returns list of Send objects"]
+        Workers["worker_node()<br>Generic Worker<br>Receives WorkerState via Send<br>Parallel execution via Send API"]
+        HITL["hitl_node()<br>Pass-through<br>GRAPH INTERRUPT POINT"]
+        Router["route_feedback()<br>Conditional Edge<br>Reads feedback_type field"]
+        Exporter["export_deliverable_node()<br>Writes .md files to /outputs"]
+
+        StateGraph --> Orch
+        Orch --> AssignFn
+        AssignFn -->|"Send × N"| Workers
+        Workers --> HITL
+        HITL --> Router
+        Router -->|targeted| Workers
+        Router -->|global| Orch
+        Router -->|approved| Exporter
+        Exporter --> GraphEnd["END"]
+    end
+
+    subgraph Memory["💾 Persistence Layer"]
+        SQLite["swarm_memory.sqlite<br>LangGraph SqliteSaver<br>Checkpoints every node"]
+    end
+
+    subgraph LLMs["🤖 LLM Services"]
+        Groq["Groq Cloud API<br>LLaMA 3.3 70B Versatile<br>temp=0.2, max_retries=3<br>Orchestration only"]
+        LMStudio["LM Studio — Local<br>OpenAI-compatible API<br>Port 1234<br>All worker inference"]
+    end
+
+    %% Cross-Subgraph Connections
+    Browser <-->|"HTTP POST multipart/form-data<br>HTTP GET JSON"| FastAPI
+    FastAPI <-->|"swarm_app.invoke()<br>swarm_app.update_state()<br>swarm_app.get_state()"| LangGraph
+    LangGraph <-->|"Read/Write state<br>at every node step"| Memory
+    Orch -->|"ChatGroq.invoke()<br>with_structured_output(OrchestratorPlan)"| Groq
+    Workers -->|"ChatOpenAI.invoke()<br>base_url=localhost (port 1234)"| LMStudio

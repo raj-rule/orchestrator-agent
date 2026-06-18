@@ -1,0 +1,15 @@
+venv/
+.env
+.env.local
+.env.*.local
+node_modules/
+dist/
+outputs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+__pycache__/
+*.pyc
+.cartographer_cache/
+.gstack/
+.gemini/
