@@ -11,3 +11,4 @@ langgraph>=0.0.30
 langchain-tavily>=0.1.0
 langgraph-checkpoint-sqlite>=2.0.0
 python-multipart>=0.0.9
+python-socketio>=5.11.0

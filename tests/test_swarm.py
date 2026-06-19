@@ -71,6 +71,7 @@ def test_critic_node_revision_loop(mock_get_llm_client):
     assert "Reviewer Feedback" in result["deliverables"]["Copywriter"]
 
 def test_route_critic():
+    from langgraph.graph import END
     # Loop back to worker since not approved and max revision not reached
     state1 = {
         "approved_by_critic": False,
@@ -78,19 +79,19 @@ def test_route_critic():
     }
     assert route_critic(state1) == "worker_node"
     
-    # Approved goes to hitl
+    # Approved: subgraph ends (returns to parent graph which routes to hitl)
     state2 = {
         "approved_by_critic": True,
         "internal_revision_count": 1
     }
-    assert route_critic(state2) == "hitl"
+    assert route_critic(state2) == END
     
-    # Max count reached goes to hitl
+    # Max count reached: subgraph also ends
     state3 = {
         "approved_by_critic": False,
         "internal_revision_count": 2
     }
-    assert route_critic(state3) == "hitl"
+    assert route_critic(state3) == END
 
 def test_clean_previous_output():
     from swarm import clean_previous_output

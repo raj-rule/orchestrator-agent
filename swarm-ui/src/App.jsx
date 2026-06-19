@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { io } from 'socket.io-client';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, PenTool, Image as ImageIcon, ArrowUp, Paperclip, Bot, User, CheckCircle, RefreshCw, ArrowRight, Plus, Menu, X, MessageSquare, Trash2, Terminal, Code, Activity, Briefcase, FileText, Settings, Eye, EyeOff } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -96,6 +97,12 @@ export default function App() {
   const [attachedFile, setAttachedFile] = useState(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const socketRef = useRef(null);
+  const terminalEndRef = useRef(null);
+
+  // Live terminal: array of { role, status, partialOutput }
+  const [liveAgents, setLiveAgents] = useState([]);
+  const [terminalVisible, setTerminalVisible] = useState(false);
 
   // Auto-scroll main chat
   useEffect(() => {
@@ -111,6 +118,113 @@ export default function App() {
       loadSession(lastSessionId);
     }
   }, []);
+
+  // ── Socket.IO setup (single persistent connection) ────────────────────────────
+  useEffect(() => {
+    const socket = io('http://localhost:8000', {
+      path: '/ws/socket.io',
+      transports: ['websocket'],
+      reconnection: true,
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('[WS] Connected:', socket.id);
+      if (sessionId) socket.emit('join_session', { session_id: sessionId });
+    });
+
+    socket.on('plan_ready', (data) => {
+      setLiveAgents(
+        (data.execution_plan || []).map(t => ({
+          role: t.agent_role,
+          status: 'pending',
+          partialOutput: '',
+        }))
+      );
+      setTerminalVisible(true);
+    });
+
+    socket.on('agent_started', (data) => {
+      setLiveAgents(prev =>
+        prev.map(a => a.role === data.role ? { ...a, status: 'working' } : a)
+      );
+    });
+
+    socket.on('agent_token', (data) => {
+      setLiveAgents(prev =>
+        prev.map(a =>
+          a.role === data.role
+            ? { ...a, partialOutput: a.partialOutput + data.token }
+            : a
+        )
+      );
+      terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
+
+    socket.on('agent_critic_reviewing', (data) => {
+      setLiveAgents(prev =>
+        prev.map(a => a.role === data.role ? { ...a, status: 'reviewing' } : a)
+      );
+    });
+
+    socket.on('agent_done', (data) => {
+      setLiveAgents(prev =>
+        prev.map(a =>
+          a.role === data.role
+            ? { ...a, status: 'done', partialOutput: (data.output || a.partialOutput).slice(0, 600) }
+            : a
+        )
+      );
+    });
+
+    socket.on('swarm_status', (data) => {
+      console.log('[WS] swarm_status:', data.status);
+    });
+
+    socket.on('swarm_complete', (data) => {
+      setIsProcessing(false);
+      if (data.agent_statuses) setAgentStatuses(data.agent_statuses);
+      const newDeliverables = data.deliverables;
+      const deliverables = newDeliverables && Object.keys(newDeliverables).length > 0
+        ? newDeliverables
+        : {};
+      const executionPlan = data.execution_plan || [];
+      setMessages(prev => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: 'ai',
+          type: 'draft',
+          content: { deliverables, executionPlan },
+          isAwaitingFeedback: data.status !== 'completed',
+          isFinal: data.status === 'completed',
+        }
+      ]);
+      setLiveAgents(prev => prev.map(a => ({ ...a, status: 'done' })));
+    });
+
+    socket.on('swarm_error', (data) => {
+      setIsProcessing(false);
+      setMessages(prev => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: 'ai',
+          type: 'text',
+          content: `System Error: ${data.message}`,
+        }
+      ]);
+    });
+
+    return () => { socket.disconnect(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-join room when sessionId changes (user switches session mid-generation)
+  useEffect(() => {
+    if (socketRef.current?.connected && sessionId) {
+      socketRef.current.emit('join_session', { session_id: sessionId });
+    }
+  }, [sessionId]);
 
   // Sync session selection
   useEffect(() => {
@@ -162,12 +276,17 @@ export default function App() {
       const savedChat = localStorage.getItem(`swarm_chat_${id}`);
       const loaded = savedChat ? JSON.parse(savedChat) : [];
       setMessages(loaded);
-      
-      // Attempt to sync with backend
-      const response = await fetch(`http://localhost:8000/api/sessions/${id}`);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.agent_statuses) setAgentStatuses(data.agent_statuses);
+
+      // Only sync with backend if a real swarm campaign ran for this session.
+      // Sessions that only have conversational replies never hit the backend,
+      // so calling /api/sessions/{id} for them would always 404.
+      const hadCampaign = loaded.some(m => m.type === 'draft');
+      if (hadCampaign) {
+        const response = await fetch(`http://localhost:8000/api/sessions/${id}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.agent_statuses) setAgentStatuses(data.agent_statuses);
+        }
       }
     } catch (err) {
       console.warn("Session sync failed:", err);
@@ -193,66 +312,80 @@ export default function App() {
     if (sessionId === id) startNewChat();
   };
 
-  const startCampaign = async (promptText) => {
+  const startCampaign = useCallback(async (promptText) => {
     setIsProcessing(true);
     setActiveView('main');
-    
-    try {
-      const formData = new FormData();
-      formData.append('session_id', sessionId);
-      formData.append('task_prompt', promptText);
-      if (guidelinesPath) formData.append('guidelines_path', guidelinesPath);
-      if (attachedFile) formData.append('file', attachedFile);
+    setLiveAgents([]);
+    setTerminalVisible(true);
 
-      const response = await fetch('http://localhost:8000/api/start', {
-        method: 'POST',
-        body: formData,
-        headers: {
-          'X-LLM-Provider': provider,
-          'X-Groq-API-Key': groqKey,
-          'X-Gemini-API-Key': geminiKey,
-          'X-OpenRouter-API-Key': openrouterKey,
-          'X-Langsmith-Tracing': langsmithEnabled ? 'true' : 'false',
-          'X-Langsmith-API-Key': langsmithKey,
-          'X-Langsmith-Project': langsmithProject,
-          'X-Langsmith-Endpoint': langsmithEndpoint,
-        }
-      });
-
-      if (!response.ok) throw new Error(`Server error: ${response.status}`);
-      const data = await response.json();
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-
-      if (parsedData.agent_statuses) setAgentStatuses(parsedData.agent_statuses);
-
-      const newDeliverables = parsedData?.deliverables;
-      const deliverables = newDeliverables && Object.keys(newDeliverables).length > 0 ? newDeliverables : (latestDeliverables || {});
-      const executionPlan = parsedData?.execution_plan || [];
-
-      setMessages(prev => [
-        ...prev, 
-        {
-          id: crypto.randomUUID(),
-          role: 'ai',
-          type: 'draft',
-          content: { deliverables, executionPlan },
-          isAwaitingFeedback: true,
-          isFinal: false
-        }
-      ]);
-    } catch (error) {
-      setMessages(prev => [
-        ...prev, 
-        {
-          id: crypto.randomUUID(),
-          role: 'ai',
-          type: 'text',
-          content: `System Error: Unable to connect to the Swarm backend. (${error.message})`
-        }
-      ]);
-    } finally {
-      setIsProcessing(false);
+    // Encode attached file as base64 if present
+    let fileContent = '';
+    let fileName = '';
+    if (attachedFile) {
+      fileName = attachedFile.name;
+      const arrayBuffer = await attachedFile.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      fileContent = btoa(binary);
+      setAttachedFile(null);
     }
+
+    // Ensure room joined before emitting
+    socketRef.current?.emit('join_session', { session_id: sessionId });
+    socketRef.current?.emit('start_campaign', {
+      session_id:        sessionId,
+      task_prompt:       promptText,
+      guidelines_path:   guidelinesPath || 'brand_guidelines.txt',
+      file_content:      fileContent,
+      file_name:         fileName,
+      provider,
+      groq_api_key:      groqKey,
+      gemini_api_key:    geminiKey,
+      openrouter_api_key: openrouterKey,
+      langsmith_tracing:  langsmithEnabled ? 'true' : 'false',
+      langsmith_api_key:  langsmithKey,
+      langsmith_project:  langsmithProject,
+      langsmith_endpoint: langsmithEndpoint,
+    });
+  }, [sessionId, guidelinesPath, attachedFile, provider, groqKey, geminiKey, openrouterKey,
+      langsmithEnabled, langsmithKey, langsmithProject, langsmithEndpoint]);
+
+  /**
+   * Detects if the input is a casual/off-topic message that should NOT trigger
+   * the swarm. Returns a friendly reply string, or null if it's a real task.
+   */
+  const getConversationalReply = (text) => {
+    const t = text.trim().toLowerCase();
+    const wordCount = t.split(/\s+/).length;
+
+    // Very short greetings / single-word inputs
+    const greetings = ['hi', 'hello', 'hey', 'sup', 'yo', 'howdy', 'hiya', 'good morning', 'good afternoon', 'good evening', 'morning', 'evening'];
+    if (greetings.some(g => t === g || t.startsWith(g + ' ') || t.startsWith(g + '!'))) {
+      return "👋 Hey there! I'm the **CriticAI Orchestrator**. Describe your project, campaign, or task and I'll spin up a team of specialized AI agents to tackle it in parallel. What would you like to build?";
+    }
+
+    // Thank-you / acknowledgement messages
+    const thanks = ['thanks', 'thank you', 'ty', 'thx', 'cheers', 'great', 'awesome', 'cool', 'nice', 'perfect', 'got it', 'ok', 'okay', 'k', 'sure', 'sounds good', 'alright'];
+    if (thanks.some(k => t === k || t === k + '!')) {
+      return "You're welcome! 😊 Let me know if there's anything else you'd like the swarm to work on.";
+    }
+
+    // Pasted document / brand guidelines detection
+    // Heuristic: very long text (>300 words) that contains typical doc markers but no action verbs
+    const hasDocMarkers = /(brand guidelines|compliance checklist|introduction|training and resources|potential challenges)/i.test(text);
+    const hasSwarmActionVerbs = /(build|create|launch|design|write|develop|generate|implement|set up|plan|research|analyze|make me|help me build)/i.test(text);
+    if (hasDocMarkers && !hasSwarmActionVerbs) {
+      return `📄 It looks like you've pasted a document (e.g. brand guidelines). I can't auto-launch the swarm from raw document content alone.\n\nTry describing what you'd like me to **do** with it — for example:\n> *'Review my brand guidelines and create a marketing campaign for a new product launch.'*`;
+    }
+
+    // Generic off-topic short messages (no clear task intent, < 5 words)
+    const hasTaskIntent = /(build|create|launch|design|write|develop|generate|implement|set up|plan|research|analyze|make|help|fix|improve|review|audit|draft|outline|strategy|app|website|product|campaign|startup|code|api|feature)/i.test(text);
+    if (wordCount <= 4 && !hasTaskIntent) {
+      return "I'm not sure what you'd like me to do with that! 🤔 Try describing a project or task, and I'll dispatch the right agents to get it done.";
+    }
+
+    return null; // It's a real task — let the swarm handle it
   };
 
   const handleSendPrompt = () => {
@@ -267,29 +400,46 @@ export default function App() {
     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', type: 'text', content: userPrompt }]);
     setInputValue('');
     setShowSettings(false);
+
+    // 🧠 Conversational intent check — skip the swarm for casual / irrelevant inputs
+    const conversationalReply = getConversationalReply(userPrompt);
+    if (conversationalReply) {
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'ai',
+        type: 'text',
+        content: conversationalReply
+      }]);
+      if (attachedFile) setAttachedFile(null);
+      return; // Do NOT invoke the swarm
+    }
     
-    if (messages.length === 0) {
+    // Check if the swarm has actually started (not just conversational replies).
+    // Using messages.length===0 was wrong: conversational replies add messages
+    // without ever starting a swarm session, breaking subsequent real-task routing.
+    const hasCampaignStarted = messages.some(m => m.type === 'draft');
+    if (!hasCampaignStarted) {
       startCampaign(userPrompt);
     } else {
       handleRevise(userPrompt);
     }
-    
+
     if (attachedFile) setAttachedFile(null);
   };
 
-  const handleRevise = async (feedbackText, targetAgent = null, isApproved = false) => {
+  const handleRevise = useCallback(async (feedbackText, targetAgent = null, isApproved = false) => {
     if (isProcessing) return;
-    
+
     // Mark previous drafts as no longer awaiting feedback
-    setMessages(prev => prev.map(msg => 
+    setMessages(prev => prev.map(msg =>
       msg.type === 'draft' ? { ...msg, isAwaitingFeedback: false, isFinal: isApproved } : msg
     ));
 
-    const userMsg = { 
-      id: crypto.randomUUID(), 
-      role: 'user', 
+    const userMsg = {
+      id: crypto.randomUUID(),
+      role: 'user',
       type: 'text',
-      content: isApproved ? 'Approve and finalize.' : (targetAgent ? `Targeted Revision to ${targetAgent}: ${feedbackText}` : `Global Revision: ${feedbackText}`) 
+      content: isApproved ? '\u2705 Approve and finalize.' : feedbackText,
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -298,7 +448,7 @@ export default function App() {
         id: crypto.randomUUID(),
         role: 'ai',
         type: 'text',
-        content: "Campaign finalized successfully! All assets have been exported."
+        content: 'Campaign finalized successfully! All assets have been exported.',
       }]);
       setActiveView('main');
       return;
@@ -306,65 +456,41 @@ export default function App() {
 
     setIsProcessing(true);
     setActiveView('main');
+    setLiveAgents([]);
+    setTerminalVisible(true);
 
-    try {
-      const formData = new FormData();
-      formData.append('session_id', sessionId);
-      formData.append('feedback', feedbackText);
-      formData.append('type', targetAgent ? 'targeted' : 'global');
-      if (targetAgent) formData.append('target_agent', targetAgent);
-      if (attachedFile) formData.append('file', attachedFile);
-
-      const response = await fetch('http://localhost:8000/api/feedback', {
-        method: 'POST',
-        body: formData,
-        headers: {
-          'X-LLM-Provider': provider,
-          'X-Groq-API-Key': groqKey,
-          'X-Gemini-API-Key': geminiKey,
-          'X-OpenRouter-API-Key': openrouterKey,
-          'X-Langsmith-Tracing': langsmithEnabled ? 'true' : 'false',
-          'X-Langsmith-API-Key': langsmithKey,
-          'X-Langsmith-Project': langsmithProject,
-          'X-Langsmith-Endpoint': langsmithEndpoint,
-        }
-      });
-
-      if (!response.ok) throw new Error(`Server error: ${response.status}`);
-      const data = await response.json();
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-
-      if (parsedData.agent_statuses) setAgentStatuses(parsedData.agent_statuses);
-
-      const newDeliverables = parsedData?.deliverables;
-      const deliverables = newDeliverables && Object.keys(newDeliverables).length > 0 ? newDeliverables : (latestDeliverables || {});
-      const executionPlan = parsedData?.execution_plan || [];
-
-      setMessages(prev => [
-        ...prev, 
-        {
-          id: crypto.randomUUID(),
-          role: 'ai',
-          type: 'draft',
-          content: { deliverables, executionPlan },
-          isAwaitingFeedback: true,
-          isFinal: false
-        }
-      ]);
-    } catch (error) {
-      setMessages(prev => [
-        ...prev, 
-        {
-          id: crypto.randomUUID(),
-          role: 'ai',
-          type: 'text',
-          content: `System Error: Unable to process revision. (${error.message})`
-        }
-      ]);
-    } finally {
-      setIsProcessing(false);
+    // Encode attached file as base64 if present
+    let fileContent = '';
+    let fileName = '';
+    if (attachedFile) {
+      fileName = attachedFile.name;
+      const arrayBuffer = await attachedFile.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      fileContent = btoa(binary);
+      setAttachedFile(null);
     }
-  };
+
+    socketRef.current?.emit('join_session', { session_id: sessionId });
+    socketRef.current?.emit('send_feedback', {
+      session_id:    sessionId,
+      feedback:      feedbackText,
+      type:          targetAgent ? 'targeted' : 'global',
+      target_agent:  targetAgent || null,
+      file_content:  fileContent,
+      file_name:     fileName,
+      provider,
+      groq_api_key:       groqKey,
+      gemini_api_key:     geminiKey,
+      openrouter_api_key: openrouterKey,
+      langsmith_tracing:  langsmithEnabled ? 'true' : 'false',
+      langsmith_api_key:  langsmithKey,
+      langsmith_project:  langsmithProject,
+      langsmith_endpoint: langsmithEndpoint,
+    });
+  }, [isProcessing, sessionId, attachedFile, provider, groqKey, geminiKey, openrouterKey,
+      langsmithEnabled, langsmithKey, langsmithProject, langsmithEndpoint]);
 
   const handleTargetedRevise = (agentRole, feedbackText) => {
     if (isProcessing || !feedbackText.trim()) return;
@@ -458,6 +584,66 @@ export default function App() {
                   </AnimatePresence>
                 </div>
               </div>
+
+              {/* ── LIVE TERMINAL ── */}
+              <AnimatePresence>
+                {terminalVisible && liveAgents.length > 0 && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="px-3 pt-0 pb-3 border-t border-white/5"
+                  >
+                    <div className="flex items-center justify-between px-2 mb-2 mt-3">
+                      <div className="text-xs font-semibold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
+                        <Activity size={11} className="text-emerald-400 animate-pulse" />
+                        Live Terminal
+                      </div>
+                      <button
+                        onClick={() => setTerminalVisible(false)}
+                        className="text-zinc-600 hover:text-zinc-400 transition-colors"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                    <div className="bg-zinc-950 border border-white/5 rounded-lg overflow-hidden">
+                      {/* Agent Status Bubbles */}
+                      <div className="flex flex-wrap gap-1.5 p-2 border-b border-white/5">
+                        {liveAgents.map(agent => (
+                          <span
+                            key={agent.role}
+                            title={agent.role}
+                            className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest border transition-all ${
+                              agent.status === 'done'
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                                : agent.status === 'reviewing'
+                                ? 'border-violet-500/30 bg-violet-500/10 text-violet-400'
+                                : agent.status === 'working'
+                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-400 animate-pulse'
+                                : 'border-zinc-700 bg-zinc-900 text-zinc-600'
+                            }`}
+                          >
+                            {agent.role.length > 14 ? agent.role.slice(0, 14) + '…' : agent.role}
+                          </span>
+                        ))}
+                      </div>
+                      {/* Scrollable live output */}
+                      <div className="h-44 overflow-y-auto font-mono text-[10px] leading-relaxed text-emerald-300/80 p-2 space-y-1">
+                        {liveAgents.filter(a => a.partialOutput).map(agent => (
+                          <div key={agent.role} className="mb-1">
+                            <span className="text-zinc-500">[{agent.role.slice(0,12)}]</span>{' '}
+                            <span className="whitespace-pre-wrap break-words">{agent.partialOutput.slice(-400)}</span>
+                          </div>
+                        ))}
+                        {liveAgents.every(a => !a.partialOutput) && (
+                          <div className="text-zinc-600 italic">Waiting for agents to start…</div>
+                        )}
+                        <div ref={terminalEndRef} />
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {/* Recent Sessions */}
               <div className="px-3 pt-2 pb-4 border-t border-white/5">
@@ -727,7 +913,11 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="text-2xl font-semibold text-zinc-100">{activeView}</h2>
-                    <p className="text-sm text-zinc-500 mt-0.5">Dedicated output canvas</p>
+                    <p className="text-sm text-zinc-500 mt-0.5">
+                      {latestDraft?.content?.executionPlan?.find(t => t.agent_role === activeView)?.task_description
+                        ? latestDraft.content.executionPlan.find(t => t.agent_role === activeView).task_description.slice(0, 120) + (latestDraft.content.executionPlan.find(t => t.agent_role === activeView).task_description.length > 120 ? '…' : '')
+                        : 'Dedicated output canvas'}
+                    </p>
                   </div>
                 </div>
                 

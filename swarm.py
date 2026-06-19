@@ -28,8 +28,24 @@ from langchain_tavily import TavilySearch
 
 load_dotenv()
 
-# ==========================================
-# 1. THE STATE (Dynamic Memory) & SCHEMAS
+import asyncio as _asyncio
+
+def _sync_emit(session_id: str, event: str, data: dict) -> None:
+    """
+    Fire-and-forget socket emit from a synchronous LangGraph node.
+    Works because FastAPI's event loop runs in the main thread while
+    LangGraph nodes run in a thread-pool executor (run_in_executor).
+    """
+    if not session_id:
+        return
+    try:
+        from socket_server import emit_to_session
+        loop = _asyncio.get_event_loop()
+        _asyncio.run_coroutine_threadsafe(emit_to_session(session_id, event, data), loop)
+    except Exception as exc:
+        print(f"[WS EMIT ERROR] {exc}")
+
+
 # ==========================================
 class Assignment(BaseModel):
     reasoning: str = Field(description="Step-by-step chain of thought explaining why this specific agent role is required, and whether a new technical skill is needed.")
@@ -98,6 +114,10 @@ class WorkerState(TypedDict):
     critic_feedback: str
     internal_revision_count: int
     approved_by_critic: bool
+    # Tracked inside the subgraph; merged back into SwarmState by the wrapper
+    worker_status: str          # 'completed' | 'error'
+    deliverables: dict          # {role: output}  (single-writer inside subgraph)
+    agent_statuses: dict        # {role: status}  (single-writer inside subgraph)
 
 
 # ==========================================
@@ -159,15 +179,17 @@ def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False)
 
     if provider == "groq" and groq_key:
         model = "llama-3.3-70b-versatile" if is_orchestrator else "llama-3.1-8b-instant"
-        return ChatGroq(model=model, api_key=groq_key, temperature=0.2 if is_orchestrator else 0.7)
+        # Cap max_tokens for workers to reduce TPM usage and avoid rate limits
+        extra = {"max_tokens": 2048} if is_orchestrator else {"max_tokens": 1024}
+        return ChatGroq(model=model, api_key=groq_key, temperature=0.2 if is_orchestrator else 0.7, **extra)
         
     elif provider == "gemini" and gemini_key:
         model = "gemini-1.5-flash"
         return ChatGoogleGenerativeAI(model=model, google_api_key=gemini_key, temperature=0.2 if is_orchestrator else 0.7)
         
     elif provider == "openrouter" and openrouter_key:
-        # OpenRouter free tier or standard models
-        model = "google/gemini-2.0-flash-exp:free" if is_orchestrator else "meta-llama/llama-3-8b-instruct:free"
+        # openrouter/free — routes to the best available free model on OpenRouter.
+        model = "openrouter/free"
         return ChatOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=openrouter_key,
@@ -293,6 +315,11 @@ Correct Action: The request is about copy. You already have a Copywriter. You MU
     for i, task in enumerate(execution_plan, 1):
         print(f"  {i}. [{task['agent_role']}] ({task['action_type']}) -> {task['task_description'][:80]}...")
 
+    ws_session_id = (config or {}).get("configurable", {}).get("ws_session_id", "")
+    _sync_emit(ws_session_id, "plan_ready", {
+        "execution_plan": execution_plan,
+        "agent_count":    len(execution_plan),
+    })
     return {
         "execution_plan": execution_plan,
         "agent_statuses": {task["agent_role"]: "working" for task in execution_plan}
@@ -373,17 +400,29 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
 
     # Workers use dynamic LLM client
     dyn_worker_llm = get_llm_client(config, is_orchestrator=False)
-    
-    # Bind tools from global tools_list
+
+    # Only bind tools for providers that support tool-use on their models.
+    # OpenRouter free-tier Llama models do NOT support tool use — binding tools
+    # causes a 404 "No endpoints found that support tool use" error.
+    configurable = config.get("configurable", {}) if config else {}
+    provider = configurable.get("llm_provider", "").lower()
+    # openrouter/auto may route to models that support tool use — allow it.
+    # If the routed model doesn't support tools, the except block will retry without them.
+    tools_supported = provider in ("groq", "gemini", "openrouter") or (
+        provider == "" and (os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY"))
+    )
+
     tools_map = {t.name: t for t in tools_list}
-    llm_with_tools = dyn_worker_llm.bind_tools(tools_list)
+    llm_with_tools = dyn_worker_llm.bind_tools(tools_list) if tools_supported else dyn_worker_llm
 
     messages = [
         SystemMessage(content=system_content),
-        HumanMessage(content=f"Execute your assignment now. Be detailed and specific. Use tools if needed."),
+        HumanMessage(content=f"Execute your assignment now. Be detailed and specific." + (" Use tools if needed." if tools_supported else "")),
     ]
 
     print(f"\n[WORKER:{role}] Starting task... (dynamic LLM + tools)")
+    ws_session_id = (config or {}).get("configurable", {}).get("ws_session_id", "")
+    _sync_emit(ws_session_id, "agent_started", {"role": role, "task": task_desc[:120]})
     try:
         # Tool execution loop (up to 3 tool call turns)
         for turn in range(3):
@@ -417,17 +456,34 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
 
         print(f"[WORKER:{role}] Done. ({len(output)} chars)")
         status = "completed"
+        _sync_emit(ws_session_id, "agent_done", {"role": role, "output": output})
     except Exception as e:
-        print(f"Worker {role} failed: {e}")
-        output = "⚠️ **System Notice:** This agent encountered an error or timed out due to hardware constraints. Please request a targeted revision to try again."
-        status = "error"
+        err_str = str(e)
+        # Graceful retry once on rate-limit (429) errors with a short back-off
+        if "429" in err_str or "rate_limit" in err_str.lower() or "rate limit" in err_str.lower():
+            print(f"[WORKER:{role}] Rate limit hit, retrying after 10s...")
+            time.sleep(10)
+            try:
+                response = dyn_worker_llm.invoke(messages)
+                output = response.content.strip()
+                print(f"[WORKER:{role}] Retry succeeded. ({len(output)} chars)")
+                status = "completed"
+            except Exception as e2:
+                print(f"Worker {role} retry also failed: {e2}")
+                output = f"⚠️ **Rate Limit:** The AI provider is temporarily overloaded. Please wait a moment and request a targeted revision to regenerate this agent's output."
+                status = "error"
+        else:
+            print(f"Worker {role} failed: {e}")
+            output = f"⚠️ **Agent Error:** This agent encountered an unexpected error.\n\n**Details:** `{err_str[:200]}`\n\nPlease request a targeted revision to try again."
+            status = "error"
 
     # Return updates to WorkerState and SwarmState
     return {
         "previous_output": output,
+        "worker_status": status,
         "deliverables": {role: output},
         "agent_statuses": {role: status},
-        "approved_by_critic": False
+        "approved_by_critic": False,
     }
 
 
@@ -485,6 +541,8 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
     ]
     
     print(f"\n[CRITIC:{role}] Reviewing deliverable...")
+    ws_session_id = (config or {}).get("configurable", {}).get("ws_session_id", "")
+    _sync_emit(ws_session_id, "agent_critic_reviewing", {"role": role})
     try:
         response = dyn_critic_llm.invoke(messages)
         review = response.content.strip()
@@ -520,45 +578,97 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
 
 
 def route_critic(state: WorkerState):
+    """Routing function used inside the worker subgraph.
+    Returns 'worker_node' for another revision cycle, or END when approved/max revisions reached.
+    """
     approved = state.get("approved_by_critic", False)
     revision_count = state.get("internal_revision_count", 0)
     role = state.get("agent_role", "Worker")
-    
+
     if approved or revision_count >= 2:
         if revision_count >= 2 and not approved:
-            print(f"[CRITIC ROUTER:{role}] Max internal revision limit reached. Proceeding to HITL.")
+            print(f"[CRITIC ROUTER:{role}] Max internal revision limit reached. Finalizing.")
         else:
-            print(f"[CRITIC ROUTER:{role}] Approved! Proceeding to HITL.")
-        return "hitl"
+            print(f"[CRITIC ROUTER:{role}] Approved! Finalizing.")
+        return END
     else:
         print(f"[CRITIC ROUTER:{role}] Loop back to worker for revision.")
         return "worker_node"
 
 
 # ==========================================
-# 5b. DISPATCH EDGE  (Send API fan-out)
+# 5b. WORKER SUBGRAPH  (isolated worker-critic loop per agent)
+# ==========================================
+# The parent graph fans-out via Send to `worker_subgraph_node`.
+# Each branch runs its own worker → critic → (revise? loop back) → END
+# cycle entirely inside a *separate* StateGraph that uses WorkerState.
+# This prevents parallel branches from writing un-annotated keys like
+# `previous_output` and `approved_by_critic` to the shared SwarmState,
+# which caused InvalidUpdateError.
+
+_worker_sub = StateGraph(WorkerState)
+_worker_sub.add_node("worker_node", worker_node)
+_worker_sub.add_node("critic_node", critic_node)
+_worker_sub.set_entry_point("worker_node")
+_worker_sub.add_edge("worker_node", "critic_node")
+_worker_sub.add_conditional_edges(
+    "critic_node",
+    route_critic,
+    ["worker_node", END],
+)
+
+worker_subgraph = _worker_sub.compile()
+
+
+def worker_subgraph_node(state: WorkerState, config: RunnableConfig = None) -> dict:
+    """
+    Thin wrapper invoked from the parent SwarmState graph.
+    Runs the full worker-critic revision loop via the compiled subgraph,
+    then returns *only* the keys present in SwarmState with proper reducers:
+      - deliverables  (Annotated with operator.ior)
+      - agent_statuses (Annotated with _merge_dicts)
+    """
+    sub_config = config or {}
+    final: WorkerState = worker_subgraph.invoke(state, config=sub_config)
+    role = final["agent_role"]
+    output = final.get("previous_output", "")
+    status = final.get("worker_status", "completed")
+    return {
+        "deliverables":   {role: output},
+        "agent_statuses": {role: status},
+    }
+
+
+# ==========================================
+# 5c. DISPATCH EDGE  (Send API fan-out)
 # ==========================================
 def assign_workers(state: SwarmState) -> list[Send]:
     """
     Conditional edge called after `orchestrator`.
 
     Iterates `execution_plan` and issues one `Send` per task, which causes
-    LangGraph to spawn all worker_node invocations in parallel.
+    LangGraph to spawn all worker_subgraph_node invocations in parallel.
+    Each invocation runs its own isolated worker-critic loop.
     """
     return [
         Send(
-            "worker_node",
+            "worker_subgraph_node",
             {
-                "agent_role":       task["agent_role"],
-                "task_description": task["task_description"],
-                "task_prompt":      state.get("user_brief", state["task_prompt"]),
-                "guidelines_path":  state.get("guidelines_path", "brand_guidelines.txt"),
-                "feedback":         state.get("feedback", ""),
-                "feedback_type":    state.get("feedback_type", ""),
-                "previous_output":  clean_previous_output(state.get("deliverables", {}).get(task["agent_role"], "")),
-                "critic_feedback":   "",
+                "agent_role":              task["agent_role"],
+                "task_description":        task["task_description"],
+                "task_prompt":             state.get("user_brief", state["task_prompt"]),
+                "guidelines_path":         state.get("guidelines_path", "brand_guidelines.txt"),
+                "feedback":                state.get("feedback", ""),
+                "feedback_type":           state.get("feedback_type", ""),
+                "previous_output":         clean_previous_output(
+                                               state.get("deliverables", {}).get(task["agent_role"], "")
+                                           ),
+                "critic_feedback":         "",
                 "internal_revision_count": 0,
-                "approved_by_critic": False
+                "approved_by_critic":      False,
+                "worker_status":           "",
+                "deliverables":            {},
+                "agent_statuses":          {},
             },
         )
         for task in state["execution_plan"]
@@ -566,11 +676,11 @@ def assign_workers(state: SwarmState) -> list[Send]:
 
 
 # ==========================================
-# 5c. FEEDBACK ROUTING
+# 5d. FEEDBACK ROUTING
 # ==========================================
 def route_feedback(state: SwarmState):
     fb_type = state.get("feedback_type", "")
-    
+
     if fb_type == "targeted":
         target = state.get("target_agent", "")
         task_desc = ""
@@ -578,21 +688,26 @@ def route_feedback(state: SwarmState):
             if task.get("agent_role") == target:
                 task_desc = task.get("task_description", "")
                 break
-        
+
         return [
             Send(
-                "worker_node",
+                "worker_subgraph_node",
                 {
-                    "agent_role": target,
-                    "task_description": task_desc,
-                    "task_prompt": state.get("user_brief", state["task_prompt"]),
-                    "guidelines_path": state.get("guidelines_path", "brand_guidelines.txt"),
-                    "feedback": state.get("feedback", ""),
-                    "feedback_type": "targeted",
-                    "previous_output": clean_previous_output(state.get("deliverables", {}).get(target, "")),
-                    "critic_feedback": "",
+                    "agent_role":              target,
+                    "task_description":        task_desc,
+                    "task_prompt":             state.get("user_brief", state["task_prompt"]),
+                    "guidelines_path":         state.get("guidelines_path", "brand_guidelines.txt"),
+                    "feedback":                state.get("feedback", ""),
+                    "feedback_type":           "targeted",
+                    "previous_output":         clean_previous_output(
+                                                   state.get("deliverables", {}).get(target, "")
+                                               ),
+                    "critic_feedback":         "",
                     "internal_revision_count": 0,
-                    "approved_by_critic": False
+                    "approved_by_critic":      False,
+                    "worker_status":           "",
+                    "deliverables":            {},
+                    "agent_statuses":          {},
                 }
             )
         ]
@@ -856,18 +971,24 @@ def export_deliverable_node(state: SwarmState):
 # ==========================================
 # 8. COMPILE GRAPH
 # ==========================================
-# ── Phase 2 graph (Dynamic Worker Dispatch) ───────────────────────
+# ── Phase 2 graph (Dynamic Worker Dispatch via Subgraph) ─────────
 #
-#   orchestrator
+#   guardrail
 #       │
-#       └─ assign_workers() ──┬─ Send → worker_node  (parallel)
-#                             ├─ Send → worker_node
-#                             └─ Send → worker_node
-#                                           │
-#                                          END
+#       ├─(blocked)─► hitl
+#       └─(safe)───► orchestrator
+#                        │
+#                        └─ assign_workers() ──┬─ Send → worker_subgraph_node (parallel)
+#                                              ├─ Send → worker_subgraph_node
+#                                              └─ Send → worker_subgraph_node
+#                                                            │ (writes only deliverables + agent_statuses)
+#                                                           hitl
+#                                                            │
+#                                                        exporter ──► END
 #
-# Legacy creative-pipeline nodes (copywriter / art_director / reviewer /
-# hitl / exporter) are retained but commented out until Phase 3 re-wiring.
+# Each worker_subgraph_node runs an isolated worker→critic loop
+# (worker_subgraph) and returns ONLY SwarmState-annotated keys so that
+# parallel execution never conflicts on un-annotated WorkerState fields.
 # ─────────────────────────────────────────────────────────────────
 
 workflow = StateGraph(SwarmState)
@@ -875,16 +996,15 @@ workflow = StateGraph(SwarmState)
 tool_node = ToolNode(tools_list)
 
 # ── Register nodes ────────────────────────────────────────────────
-workflow.add_node("orchestrator", orchestrator_node)
-workflow.add_node("worker_node",  worker_node)        # Phase 2: dynamic workers
-workflow.add_node("critic_node",  critic_node)
-workflow.add_node("copywriter",   copywriter_node)
-workflow.add_node("art_director", art_director_node)
-workflow.add_node("reviewer",     reviewer_node)
-workflow.add_node("tools",        tool_node)
-workflow.add_node("hitl",         hitl_node)
-workflow.add_node("exporter",     export_deliverable_node)
-workflow.add_node("guardrail",    guardrail_node)
+workflow.add_node("orchestrator",        orchestrator_node)
+workflow.add_node("worker_subgraph_node", worker_subgraph_node)  # Phase 2: isolated subgraph
+workflow.add_node("copywriter",          copywriter_node)
+workflow.add_node("art_director",        art_director_node)
+workflow.add_node("reviewer",            reviewer_node)
+workflow.add_node("tools",               tool_node)
+workflow.add_node("hitl",               hitl_node)
+workflow.add_node("exporter",           export_deliverable_node)
+workflow.add_node("guardrail",          guardrail_node)
 
 # ── Phase 2 active wiring ─────────────────────────────────────────
 workflow.set_entry_point("guardrail")
@@ -896,27 +1016,20 @@ workflow.add_conditional_edges(
     ["orchestrator", "hitl"]
 )
 
-# Fan-out: orchestrator → N parallel worker_node invocations via Send
+# Fan-out: orchestrator → N parallel worker_subgraph_node invocations via Send
 workflow.add_conditional_edges(
     "orchestrator",
     assign_workers,
-    ["worker_node"],   # declare the possible target node(s)
+    ["worker_subgraph_node"],
 )
 
-# Worker draft goes to internal critic node
-workflow.add_edge("worker_node", "critic_node")
-
-# Critic node conditional routing: revise goes to worker_node, approved goes to hitl
-workflow.add_conditional_edges(
-    "critic_node",
-    route_critic,
-    ["worker_node", "hitl"]
-)
+# Each worker subgraph finishes → collect at hitl (HITL checkpoint)
+workflow.add_edge("worker_subgraph_node", "hitl")
 
 workflow.add_conditional_edges(
     "hitl",
     route_feedback,
-    ["worker_node", "orchestrator", "exporter"]
+    ["worker_subgraph_node", "orchestrator", "exporter"]
 )
 workflow.add_edge("exporter", END)
 

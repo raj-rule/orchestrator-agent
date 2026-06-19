@@ -1,4 +1,5 @@
 import uvicorn
+import asyncio
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 from langchain_core.messages import HumanMessage
 from langchain_core.tracers.context import tracing_v2_enabled
 from swarm import app as swarm_app
+from socket_server import sio, socket_app, emit_to_session
 
 async def extract_text(file: UploadFile) -> str:
     if not file:
@@ -149,15 +151,23 @@ async def start_swarm(
         swarm_app.invoke(initial_state, config=config)
     
     # Get the current state snapshot after interrupt
-    state_snapshot = swarm_app.get_state(config)
-    is_completed = not state_snapshot.next
-    
-    return {
-        "status": "completed" if is_completed else "pending_review",
-        "deliverables": state_snapshot.values.get("deliverables", {}),
-        "execution_plan": state_snapshot.values.get("execution_plan", []),
-        "agent_statuses": state_snapshot.values.get("agent_statuses", {})
-    }
+    try:
+        state_snapshot = swarm_app.get_state(config)
+        is_completed = not state_snapshot.next
+        return {
+            "status": "completed" if is_completed else "pending_review",
+            "deliverables": state_snapshot.values.get("deliverables", {}),
+            "execution_plan": state_snapshot.values.get("execution_plan", []),
+            "agent_statuses": state_snapshot.values.get("agent_statuses", {})
+        }
+    except Exception:
+        # Stale checkpoint — return safe defaults
+        return {
+            "status": "completed",
+            "deliverables": {},
+            "execution_plan": [],
+            "agent_statuses": {}
+        }
 
 @app.post("/api/feedback", tags=["Swarm Lifecycle"], summary="Submit HITL Feedback", response_model=FeedbackResponse)
 async def provide_feedback(
@@ -185,10 +195,25 @@ async def provide_feedback(
             "openrouter_api_key": x_openrouter_api_key
         }
     }
-    state_snapshot = swarm_app.get_state(config)
+    try:
+        state_snapshot = swarm_app.get_state(config)
+    except Exception:
+        # Stale checkpoint from a previous graph topology — treat as completed
+        return {
+            "status": "completed",
+            "deliverables": {},
+            "execution_plan": [],
+            "agent_statuses": {}
+        }
     
     if not state_snapshot.next:
-         return {"status": "completed", "message": "Graph already completed"}
+        # Graph already completed — return last known state values
+        return {
+            "status": "completed",
+            "deliverables": state_snapshot.values.get("deliverables", {}),
+            "execution_plan": state_snapshot.values.get("execution_plan", []),
+            "agent_statuses": state_snapshot.values.get("agent_statuses", {})
+        }
 
     file_content = await extract_text(file) if file else ""
     user_feedback = f"User Feedback: {feedback}\n\nAttached Document Content:\n{file_content}" if file_content else feedback
@@ -232,15 +257,22 @@ async def provide_feedback(
         swarm_app.invoke(None, config=config)
     
     # Get the new state snapshot after it pauses again (or finishes)
-    new_snapshot = swarm_app.get_state(config)
-    is_completed = not new_snapshot.next
-    
-    return {
-        "status": "completed" if is_completed else "pending_review",
-        "deliverables": new_snapshot.values.get("deliverables", {}),
-        "execution_plan": new_snapshot.values.get("execution_plan", []),
-        "agent_statuses": new_snapshot.values.get("agent_statuses", {})
-    }
+    try:
+        new_snapshot = swarm_app.get_state(config)
+        is_completed = not new_snapshot.next
+        return {
+            "status": "completed" if is_completed else "pending_review",
+            "deliverables": new_snapshot.values.get("deliverables", {}),
+            "execution_plan": new_snapshot.values.get("execution_plan", []),
+            "agent_statuses": new_snapshot.values.get("agent_statuses", {})
+        }
+    except Exception:
+        return {
+            "status": "completed",
+            "deliverables": {},
+            "execution_plan": [],
+            "agent_statuses": {}
+        }
 
 @app.get("/api/sessions/{session_id}", tags=["Session History"], summary="Retrieve Session State", response_model=SessionResponse)
 async def get_session(session_id: str):
@@ -255,6 +287,233 @@ async def get_session(session_id: str):
         "execution_plan": state_snapshot.values.get("execution_plan", []),
         "agent_statuses": state_snapshot.values.get("agent_statuses", {})
     }
+
+# ── Mount Socket.IO under /ws (existing /api routes are untouched) ────────────
+app.mount("/ws", socket_app)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET EVENT HANDLERS  (Socket.IO)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@sio.event
+async def start_campaign(sid, data: dict):
+    """
+    Socket event: client sends campaign details, server runs swarm and streams events.
+
+    Expected data keys:
+      session_id, task_prompt, guidelines_path (opt),
+      file_content (opt, base64 str), file_name (opt),
+      provider, groq_api_key, gemini_api_key, openrouter_api_key,
+      langsmith_tracing, langsmith_api_key, langsmith_project, langsmith_endpoint
+    """
+    session_id        = data.get("session_id", "")
+    task_prompt       = data.get("task_prompt", "")
+    guidelines_path   = data.get("guidelines_path", "brand_guidelines.txt")
+    provider          = data.get("provider", "")
+    groq_key          = data.get("groq_api_key", "")
+    gemini_key        = data.get("gemini_api_key", "")
+    openrouter_key    = data.get("openrouter_api_key", "")
+    langsmith_tracing = data.get("langsmith_tracing", "false")
+    langsmith_api_key = data.get("langsmith_api_key", "")
+    langsmith_project = data.get("langsmith_project", "CriticAI")
+    langsmith_endpoint = data.get("langsmith_endpoint", "https://api.smith.langchain.com")
+
+    # Decode base64 file if present
+    file_content_text = ""
+    file_name = data.get("file_name", "")
+    file_b64  = data.get("file_content", "")
+    if file_b64 and file_name:
+        import base64
+        raw = base64.b64decode(file_b64)
+        if file_name.endswith(".txt"):
+            file_content_text = raw.decode("utf-8", errors="ignore")
+        elif file_name.endswith(".pdf"):
+            pdf_bytes = io.BytesIO(raw)
+            reader = PyPDF2.PdfReader(pdf_bytes)
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    file_content_text += extracted + "\n"
+
+    final_prompt = (
+        f"User Request: {task_prompt}\n\nAttached Document Content:\n{file_content_text}"
+        if file_content_text else task_prompt
+    )
+
+    config = {
+        "configurable": {
+            "thread_id":         session_id,
+            "llm_provider":      provider,
+            "groq_api_key":      groq_key,
+            "gemini_api_key":    gemini_key,
+            "openrouter_api_key": openrouter_key,
+            "ws_session_id":     session_id,
+        }
+    }
+
+    initial_state = {
+        "task_prompt":        final_prompt,
+        "user_brief":         task_prompt,
+        "guidelines_path":    guidelines_path,
+        "execution_plan":     [],
+        "deliverables":       {},
+        "slogan_draft":        "",
+        "image_prompt_draft": "",
+        "internal_feedback":  "",
+        "revision_count":     0,
+        "final_outputs":      [],
+    }
+
+    await emit_to_session(session_id, "swarm_status", {"status": "starting"})
+
+    def run_swarm():
+        if langsmith_tracing == "true" and langsmith_api_key:
+            from langchain_core.tracers.context import tracing_v2_enabled as _tv2
+            with _tv2(
+                project_name=langsmith_project,
+                api_key=langsmith_api_key,
+                endpoint=langsmith_endpoint,
+            ):
+                return swarm_app.invoke(initial_state, config=config)
+        else:
+            return swarm_app.invoke(initial_state, config=config)
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_swarm)
+        state_snapshot = swarm_app.get_state(config)
+        is_completed   = not state_snapshot.next
+        deliverables   = state_snapshot.values.get("deliverables", {})
+        execution_plan = state_snapshot.values.get("execution_plan", [])
+        agent_statuses = state_snapshot.values.get("agent_statuses", {})
+        await emit_to_session(session_id, "swarm_complete", {
+            "status":         "completed" if is_completed else "pending_review",
+            "deliverables":   deliverables,
+            "execution_plan": execution_plan,
+            "agent_statuses": agent_statuses,
+        })
+    except Exception as e:
+        await emit_to_session(session_id, "swarm_error", {"message": str(e)})
+
+
+@sio.event
+async def send_feedback(sid, data: dict):
+    """
+    Socket event: client sends HITL feedback to resume the graph.
+
+    Expected data keys:
+      session_id, feedback, type (global|targeted), target_agent (opt),
+      file_content (opt, base64), file_name (opt),
+      provider, groq_api_key, gemini_api_key, openrouter_api_key
+    """
+    session_id     = data.get("session_id", "")
+    feedback_text  = data.get("feedback", "")
+    fb_type        = data.get("type", "global")
+    target_agent   = data.get("target_agent")
+    provider       = data.get("provider", "")
+    groq_key       = data.get("groq_api_key", "")
+    gemini_key     = data.get("gemini_api_key", "")
+    openrouter_key = data.get("openrouter_api_key", "")
+    langsmith_tracing  = data.get("langsmith_tracing", "false")
+    langsmith_api_key  = data.get("langsmith_api_key", "")
+    langsmith_project  = data.get("langsmith_project", "CriticAI")
+    langsmith_endpoint = data.get("langsmith_endpoint", "https://api.smith.langchain.com")
+
+    # Decode file if present
+    file_content_text = ""
+    file_name = data.get("file_name", "")
+    file_b64  = data.get("file_content", "")
+    if file_b64 and file_name:
+        import base64
+        raw = base64.b64decode(file_b64)
+        if file_name.endswith(".txt"):
+            file_content_text = raw.decode("utf-8", errors="ignore")
+        elif file_name.endswith(".pdf"):
+            pdf_bytes = io.BytesIO(raw)
+            reader = PyPDF2.PdfReader(pdf_bytes)
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    file_content_text += extracted + "\n"
+
+    user_feedback = (
+        f"User Feedback: {feedback_text}\n\nAttached Document Content:\n{file_content_text}"
+        if file_content_text else feedback_text
+    )
+
+    config = {
+        "configurable": {
+            "thread_id":          session_id,
+            "llm_provider":       provider,
+            "groq_api_key":       groq_key,
+            "gemini_api_key":     gemini_key,
+            "openrouter_api_key": openrouter_key,
+            "ws_session_id":      session_id,
+        }
+    }
+
+    try:
+        state_snapshot = swarm_app.get_state(config)
+    except Exception:
+        await emit_to_session(session_id, "swarm_complete", {
+            "status": "completed", "deliverables": {}, "execution_plan": [], "agent_statuses": {}
+        })
+        return
+
+    if not state_snapshot.next:
+        await emit_to_session(session_id, "swarm_complete", {
+            "status":         "completed",
+            "deliverables":   state_snapshot.values.get("deliverables", {}),
+            "execution_plan": state_snapshot.values.get("execution_plan", []),
+            "agent_statuses": state_snapshot.values.get("agent_statuses", {}),
+        })
+        return
+
+    if user_feedback.strip().lower() in ["approve", "proceed", "yes", "y", "approved"]:
+        swarm_app.update_state(config, {"feedback": "HITL_APPROVED", "feedback_type": "approved"})
+    else:
+        new_revision_count = state_snapshot.values.get("revision_count", 0) + 1
+        update_payload = {
+            "feedback":       user_feedback,
+            "feedback_type":  fb_type,
+            "target_agent":   target_agent,
+            "revision_count": new_revision_count,
+            "messages":       [HumanMessage(content=f"Feedback ({fb_type}):\n{user_feedback}")],
+        }
+        if fb_type == "global":
+            update_payload["task_prompt"] = user_feedback
+            update_payload["user_brief"]  = feedback_text
+        swarm_app.update_state(config, update_payload)
+
+    await emit_to_session(session_id, "swarm_status", {"status": "resuming"})
+
+    def resume_swarm():
+        if langsmith_tracing == "true" and langsmith_api_key:
+            from langchain_core.tracers.context import tracing_v2_enabled as _tv2
+            with _tv2(
+                project_name=langsmith_project,
+                api_key=langsmith_api_key,
+                endpoint=langsmith_endpoint,
+            ):
+                return swarm_app.invoke(None, config=config)
+        else:
+            return swarm_app.invoke(None, config=config)
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, resume_swarm)
+        new_snapshot   = swarm_app.get_state(config)
+        is_completed   = not new_snapshot.next
+        await emit_to_session(session_id, "swarm_complete", {
+            "status":         "completed" if is_completed else "pending_review",
+            "deliverables":   new_snapshot.values.get("deliverables", {}),
+            "execution_plan": new_snapshot.values.get("execution_plan", []),
+            "agent_statuses": new_snapshot.values.get("agent_statuses", {}),
+        })
+    except Exception as e:
+        await emit_to_session(session_id, "swarm_error", {"message": str(e)})
+
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
