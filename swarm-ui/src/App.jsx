@@ -827,52 +827,7 @@ export default function App() {
     return null; // It's a real task — let the swarm handle it
   };
 
-  const handleSendPromptWithText = useCallback((userPrompt) => {
-    if (attachedFile) {
-      console.log("Attached File:", attachedFile.name);
-      setAttachedFile(null);
-    }
-    
-    setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', type: 'text', content: userPrompt }]);
-    setShowSettings(false);
 
-    const conversationalReply = getConversationalReply(userPrompt);
-    if (conversationalReply) {
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(),
-        role: 'ai',
-        type: 'text',
-        content: conversationalReply
-      }]);
-      if (attachedFile) setAttachedFile(null);
-      return;
-    }
-    
-    const hasCampaignStarted = messages.some(m => m.type === 'draft');
-    if (!hasCampaignStarted) {
-      startCampaign(userPrompt);
-    } else {
-      handleRevise(userPrompt);
-    }
-
-    if (attachedFile) setAttachedFile(null);
-  }, [messages, attachedFile, startCampaign, handleRevise]);
-
-  const handleSendButtonPress = useCallback(() => {
-    if (!inputValue.trim() || isProcessing) return;
-    const userPrompt = inputValue;
-    setInputValue('');
-
-    if (latestDraft && latestDraft.isAwaitingFeedback) {
-      handleRevise(userPrompt, null, false);
-    } else {
-      handleSendPromptWithText(userPrompt);
-    }
-  }, [inputValue, isProcessing, latestDraft, handleRevise, handleSendPromptWithText]);
-
-  const handleSendPrompt = () => {
-    handleSendButtonPress();
-  };
 
   const handleRevise = useCallback(async (feedbackText, targetAgent = null, isApproved = false) => {
     if (isProcessing) return;
@@ -947,6 +902,53 @@ export default function App() {
   const handleTargetedRevise = (agentRole, feedbackText) => {
     if (isProcessing || !feedbackText.trim()) return;
     handleRevise(feedbackText, agentRole, false);
+  };
+
+  const handleSendPromptWithText = useCallback((userPrompt) => {
+    if (attachedFile) {
+      console.log("Attached File:", attachedFile.name);
+      setAttachedFile(null);
+    }
+    
+    setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', type: 'text', content: userPrompt }]);
+    setShowSettings(false);
+
+    const conversationalReply = getConversationalReply(userPrompt);
+    if (conversationalReply) {
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'ai',
+        type: 'text',
+        content: conversationalReply
+      }]);
+      if (attachedFile) setAttachedFile(null);
+      return;
+    }
+    
+    const hasCampaignStarted = messages.some(m => m.type === 'draft');
+    if (!hasCampaignStarted) {
+      startCampaign(userPrompt);
+    } else {
+      handleRevise(userPrompt);
+    }
+
+    if (attachedFile) setAttachedFile(null);
+  }, [messages, attachedFile, startCampaign, handleRevise]);
+
+  const handleSendButtonPress = useCallback(() => {
+    if (!inputValue.trim() || isProcessing) return;
+    const userPrompt = inputValue;
+    setInputValue('');
+
+    if (latestDraft && latestDraft.isAwaitingFeedback) {
+      handleRevise(userPrompt, null, false);
+    } else {
+      handleSendPromptWithText(userPrompt);
+    }
+  }, [inputValue, isProcessing, latestDraft, handleRevise, handleSendPromptWithText]);
+
+  const handleSendPrompt = () => {
+    handleSendButtonPress();
   };
 
   const AgentNodeBadge = ({ label, icon: Icon, active, pulse, onClick }) => (
