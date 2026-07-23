@@ -12,7 +12,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from swarm import app as swarm_app
 from socket_server import sio, socket_app, emit_to_session
 from security import sign_session_id, verify_session_id, check_backend_token
@@ -608,16 +608,24 @@ Agent Deliverables:
 """
         try:
             client = get_llm_client(config, is_orchestrator=False)
-            reply_messages = [
-                SystemMessage(content=reply_system.format(
-                    user_brief=state_snapshot.values.get("user_brief", ""),
-                    execution_plan=state_snapshot.values.get("execution_plan", []),
-                    deliverables=state_snapshot.values.get("deliverables", {})
-                )),
-                HumanMessage(content=feedback_text)
-            ]
+            history = state_snapshot.values.get("messages", [])
+            system_content = reply_system.format(
+                user_brief=state_snapshot.values.get("user_brief", ""),
+                execution_plan=state_snapshot.values.get("execution_plan", []),
+                deliverables=state_snapshot.values.get("deliverables", {})
+            )
+            reply_messages = [SystemMessage(content=system_content)] + list(history) + [HumanMessage(content=feedback_text)]
+            
             reply_res = invoke_llm_with_timeout(client, reply_messages, timeout_seconds=45.0)
             reply_content = reply_res.content.strip()
+            
+            # ponytail: save both the user message and the conversational answer in SQLite checkpointer state
+            swarm_app.update_state(config, {
+                "messages": [
+                    HumanMessage(content=feedback_text),
+                    AIMessage(content=reply_content)
+                ]
+            })
             
             await emit_to_session(verified_session_id, "swarm_complete", {
                 "status": "completed" if is_completed else "pending_review",
