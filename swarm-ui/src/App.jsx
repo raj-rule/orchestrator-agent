@@ -5,6 +5,127 @@ import { Search, PenTool, Image as ImageIcon, ArrowUp, Paperclip, Bot, User, Che
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+const BehindTheScenesAccordion = ({ content }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const { liveAgents = [], agentDurations = {}, agentTokens = {} } = content || {};
+
+  return (
+    <div className="border border-white/5 bg-zinc-950/45 rounded-xl overflow-hidden mt-1 shadow-inner transition-all duration-300">
+      <button 
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-4 py-3 bg-zinc-905/30 hover:bg-zinc-800/50 transition-colors text-left"
+      >
+        <div className="flex items-center gap-2 text-zinc-400">
+          <Terminal size={14} className="text-zinc-500" />
+          <span className="text-xs font-semibold">Behind the Scenes (Swarm Execution Details)</span>
+        </div>
+        <span className="text-[10px] text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded border border-white/5 font-medium">
+          {isOpen ? 'Hide Logs' : 'Show Logs'}
+        </span>
+      </button>
+
+      {isOpen && (
+        <div className="p-4 bg-zinc-950/30 border-t border-white/5 space-y-4 max-h-96 overflow-y-auto">
+          {liveAgents.map((agent) => {
+            const role = agent.role;
+            const dur = agentDurations[role];
+            const tokens = agentTokens[role];
+            return (
+              <div key={role} className="space-y-1.5 border-b border-white/5 pb-3 last:border-0 last:pb-0">
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2 font-medium text-zinc-300">
+                    <Bot size={13} className="text-zinc-500" />
+                    <span>{role}</span>
+                  </div>
+                  <div className="flex items-center gap-2 font-mono text-[10px] text-zinc-500">
+                    {dur != null && <span>⏱️ {dur}s</span>}
+                    {tokens && (tokens.prompt > 0 || tokens.completion > 0) && (
+                      <span className="text-emerald-500/80">📥 {tokens.prompt} | 📤 {tokens.completion}</span>
+                    )}
+                  </div>
+                </div>
+                <pre className="text-[10px] text-zinc-400 bg-black/50 p-3 rounded-lg border border-white/5 font-mono overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-40">
+                  {agent.partialOutput || 'No output log collected.'}
+                </pre>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const LiveSwarmStory = ({ liveAgents = [], elapsedTime = 0, agentTokens = {} }) => {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 15 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="bg-zinc-900/50 border border-white/10 rounded-2xl p-5 my-5 space-y-4 shadow-xl max-w-xl"
+    >
+      <div className="flex items-center justify-between border-b border-white/5 pb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+          <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">Swarm Activity Story</h3>
+        </div>
+        <span className="text-[10px] bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-md font-mono border border-white/5">
+          ⏱️ {Math.round(elapsedTime)}s elapsed
+        </span>
+      </div>
+
+      <div className="space-y-3">
+        {liveAgents.length === 0 ? (
+          <div className="text-xs text-zinc-500 italic py-2 animate-pulse flex items-center gap-2">
+            <RefreshCw size={12} className="animate-spin" />
+            Orchestrator is designing execution plan and hiring agents...
+          </div>
+        ) : (
+          liveAgents.map((agent) => {
+            const role = agent.role;
+            const status = agent.status;
+            const logs = agent.partialOutput || '';
+            const lastLog = logs.trim().split('\n').pop() || 'Initializing agent...';
+            const tokens = agentTokens[role];
+            const tokenCount = tokens ? tokens.prompt + tokens.completion : 0;
+
+            return (
+              <div key={role} className="bg-black/30 border border-white/5 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {status === 'done' ? (
+                      <CheckCircle size={14} className="text-emerald-400" />
+                    ) : status === 'error' ? (
+                      <AlertTriangle size={14} className="text-rose-450" />
+                    ) : (
+                      <RefreshCw size={14} className="text-amber-400 animate-spin" />
+                    )}
+                    <span className="text-xs font-semibold text-zinc-200">{role}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {tokenCount > 0 && (
+                      <span className="text-[9px] text-emerald-400 font-mono">
+                        ({tokenCount} spend)
+                      </span>
+                    )}
+                    <span className={`text-[9px] uppercase tracking-wider font-bold ${
+                      status === 'done' ? 'text-emerald-500' : status === 'reviewing' ? 'text-violet-400' : 'text-amber-500'
+                    }`}>
+                      {status === 'done' ? 'Approved' : status === 'reviewing' ? 'Reviewing' : 'Working'}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-[11px] text-zinc-400 font-mono truncate bg-black/40 px-2.5 py-1.5 rounded border border-white/5 leading-relaxed">
+                  {lastLog}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </motion.div>
+  );
+};
+
 const LoadingSkeleton = ({ agentStatuses = {}, agentDurations = {}, agentTokens = {} }) => {
   const activeCount = Object.values(agentStatuses).filter(s => s === 'working').length;
   const completedCount = Object.values(agentStatuses).filter(s => s === 'completed').length;
@@ -154,6 +275,7 @@ export default function App() {
   const [agentDurations, setAgentDurations] = useState({});
   const [agentTokens, setAgentTokens] = useState({});
 
+
   // LLM Key states
   const [provider, setProvider] = useState('openrouter');
   const [openrouterKey, setOpenrouterKey] = useState(() => localStorage.getItem('swarm_openrouter_key') || '');
@@ -260,6 +382,25 @@ export default function App() {
   // Live terminal: array of { role, status, partialOutput }
   const [liveAgents, setLiveAgents] = useState([]);
   const [terminalVisible, setTerminalVisible] = useState(false);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const liveAgentsRef = useRef([]);
+
+  useEffect(() => {
+    liveAgentsRef.current = liveAgents;
+  }, [liveAgents]);
+
+  useEffect(() => {
+    let timer;
+    if (isProcessing) {
+      const startTime = Date.now();
+      timer = setInterval(() => {
+        setElapsedTime(Math.round((Date.now() - startTime) / 1000));
+      }, 1000);
+    } else {
+      setElapsedTime(0);
+    }
+    return () => clearInterval(timer);
+  }, [isProcessing]);
 
   // Auto-scroll main chat
   useEffect(() => {
@@ -365,9 +506,18 @@ export default function App() {
       );
     });
 
+    socket.on('agent_critic_done', (data) => {
+      if (data.tokens) {
+        setAgentTokens(prev => ({ ...prev, [data.role]: data.tokens }));
+      }
+    });
+
     socket.on('agent_done', (data) => {
       if (data.duration != null) {
         setAgentDurations(prev => ({ ...prev, [data.role]: data.duration }));
+      }
+      if (data.tokens) {
+        setAgentTokens(prev => ({ ...prev, [data.role]: data.tokens }));
       }
       setLiveAgents(prev =>
         prev.map(a =>
@@ -409,6 +559,19 @@ export default function App() {
 
       setMessages(prev => {
         const nextMsgs = [...prev];
+        
+        // ponytail: push Behind the Scenes execution log metrics card
+        nextMsgs.push({
+          id: crypto.randomUUID(),
+          role: 'ai',
+          type: 'bts_logs',
+          content: {
+            liveAgents: [...liveAgentsRef.current],
+            agentDurations: data.agent_durations || {},
+            agentTokens: data.agent_tokens || {},
+          }
+        });
+
         if (data.status === 'completed') {
           nextMsgs.push({
             id: crypto.randomUUID(),
@@ -664,20 +827,15 @@ export default function App() {
     return null; // It's a real task — let the swarm handle it
   };
 
-  const handleSendPrompt = () => {
-    if (!inputValue.trim() || isProcessing) return;
-    const userPrompt = inputValue;
-    
+  const handleSendPromptWithText = useCallback((userPrompt) => {
     if (attachedFile) {
       console.log("Attached File:", attachedFile.name);
       setAttachedFile(null);
     }
     
     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', type: 'text', content: userPrompt }]);
-    setInputValue('');
     setShowSettings(false);
 
-    // 🧠 Conversational intent check — skip the swarm for casual / irrelevant inputs
     const conversationalReply = getConversationalReply(userPrompt);
     if (conversationalReply) {
       setMessages(prev => [...prev, {
@@ -687,12 +845,9 @@ export default function App() {
         content: conversationalReply
       }]);
       if (attachedFile) setAttachedFile(null);
-      return; // Do NOT invoke the swarm
+      return;
     }
     
-    // Check if the swarm has actually started (not just conversational replies).
-    // Using messages.length===0 was wrong: conversational replies add messages
-    // without ever starting a swarm session, breaking subsequent real-task routing.
     const hasCampaignStarted = messages.some(m => m.type === 'draft');
     if (!hasCampaignStarted) {
       startCampaign(userPrompt);
@@ -701,6 +856,22 @@ export default function App() {
     }
 
     if (attachedFile) setAttachedFile(null);
+  }, [messages, attachedFile, startCampaign, handleRevise]);
+
+  const handleSendButtonPress = useCallback(() => {
+    if (!inputValue.trim() || isProcessing) return;
+    const userPrompt = inputValue;
+    setInputValue('');
+
+    if (latestDraft && latestDraft.isAwaitingFeedback) {
+      handleRevise(userPrompt, null, false);
+    } else {
+      handleSendPromptWithText(userPrompt);
+    }
+  }, [inputValue, isProcessing, latestDraft, handleRevise, handleSendPromptWithText]);
+
+  const handleSendPrompt = () => {
+    handleSendButtonPress();
   };
 
   const handleRevise = useCallback(async (feedbackText, targetAgent = null, isApproved = false) => {
@@ -875,65 +1046,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* ── LIVE TERMINAL ── */}
-              <AnimatePresence>
-                {terminalVisible && liveAgents.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="px-3 pt-0 pb-3 border-t border-white/5"
-                  >
-                    <div className="flex items-center justify-between px-2 mb-2 mt-3">
-                      <div className="text-xs font-semibold text-zinc-500 uppercase tracking-wider flex items-center gap-1.5">
-                        <Activity size={11} className="text-emerald-400 animate-pulse" />
-                        Live Terminal
-                      </div>
-                      <button
-                        onClick={() => setTerminalVisible(false)}
-                        className="text-zinc-600 hover:text-zinc-400 transition-colors"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                    <div className="bg-zinc-950 border border-white/5 rounded-lg overflow-hidden">
-                      {/* Agent Status Bubbles */}
-                      <div className="flex flex-wrap gap-1.5 p-2 border-b border-white/5">
-                        {liveAgents.map(agent => (
-                          <span
-                            key={agent.role}
-                            title={agent.role}
-                            className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest border transition-all ${
-                              agent.status === 'done'
-                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
-                                : agent.status === 'reviewing'
-                                ? 'border-violet-500/30 bg-violet-500/10 text-violet-400'
-                                : agent.status === 'working'
-                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-400 animate-pulse'
-                                : 'border-zinc-700 bg-zinc-900 text-zinc-600'
-                            }`}
-                          >
-                            {agent.role.length > 14 ? agent.role.slice(0, 14) + '…' : agent.role}
-                          </span>
-                        ))}
-                      </div>
-                      {/* Scrollable live output */}
-                      <div className="h-44 overflow-y-auto font-mono text-[10px] leading-relaxed text-emerald-300/80 p-2 space-y-1">
-                        {liveAgents.filter(a => a.partialOutput).map(agent => (
-                          <div key={agent.role} className="mb-1">
-                            <span className="text-zinc-500">[{agent.role.slice(0,12)}]</span>{' '}
-                            <span className="whitespace-pre-wrap break-words">{agent.partialOutput.slice(-400)}</span>
-                          </div>
-                        ))}
-                        {liveAgents.every(a => !a.partialOutput) && (
-                          <div className="text-zinc-600 italic">Waiting for agents to start…</div>
-                        )}
-                        <div ref={terminalEndRef} />
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+
 
               {/* Recent Sessions */}
               <div className="px-3 pt-2 pb-4 border-t border-white/5">
@@ -1099,6 +1212,10 @@ export default function App() {
                                 );
                               })()
                             )}
+                            {/* Behind the Scenes Logs Accordion */}
+                            {msg.type === 'bts_logs' && (
+                              <BehindTheScenesAccordion content={msg.content} />
+                            )}
                           </div>
                         )}
                       </div>
@@ -1113,7 +1230,7 @@ export default function App() {
                   ))}
 
                   {/* Engaging Loading State */}
-                  {isProcessing && <LoadingSkeleton agentStatuses={agentStatuses} agentDurations={agentDurations} agentTokens={agentTokens} />}
+                  {isProcessing && <LiveSwarmStory liveAgents={liveAgents} elapsedTime={elapsedTime} agentTokens={agentTokens} />}
                 </AnimatePresence>
                 <div ref={messagesEndRef} className="h-4" />
               </div>
@@ -1166,11 +1283,37 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Floating Swarm Campaign Review Helpers */}
+                {latestDraft && latestDraft.isAwaitingFeedback && !isProcessing && (
+                  <div className="flex items-center gap-2 mb-2 px-1 flex-wrap">
+                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mr-1">Review Options:</span>
+                    <button 
+                      onClick={() => { handleRevise('', null, true); setInputValue(''); }}
+                      className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-3 py-1 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+                    >
+                      <CheckCircle size={12} /> Approve & Export
+                    </button>
+                    <button 
+                      onClick={() => {
+                        if (inputValue.trim()) {
+                          handleSendButtonPress();
+                        } else {
+                          // Focus input
+                          document.getElementById('main-chat-textarea')?.focus();
+                        }
+                      }}
+                      className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-white/5 px-3 py-1 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+                    >
+                      <RefreshCw size={12} /> Request Global Revision
+                    </button>
+                  </div>
+                )}
+
                 <div className="relative flex items-end w-full bg-zinc-800/50 border border-zinc-700 focus-within:border-zinc-500 rounded-2xl p-2 transition-colors">
                   <div className="flex flex-col justify-end pb-1 px-1">
                      <button 
                        onClick={() => fileInputRef.current?.click()}
-                       disabled={!openrouterKey.trim()}
+                       disabled={!openrouterKey.trim() || isProcessing}
                        className="p-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 rounded-xl transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                        title="Attach File"
                      >
@@ -1179,57 +1322,42 @@ export default function App() {
                   </div>
                   
                   <textarea
+                    id="main-chat-textarea"
                     rows="1"
-                    placeholder={!openrouterKey.trim() ? "Configure OpenRouter API Key in Settings to message..." : (latestDraft && latestDraft.isAwaitingFeedback ? "Send global revision to the swarm..." : "Message CriticAI Orchestrator...")}
+                    placeholder={
+                      !openrouterKey.trim() 
+                        ? "Configure OpenRouter API Key in Settings to message..." 
+                        : isProcessing 
+                        ? "Swarm is working... please wait..." 
+                        : latestDraft && latestDraft.isAwaitingFeedback 
+                        ? "Provide global feedback or ask a question..." 
+                        : "Message CriticAI Orchestrator..."
+                    }
                     value={inputValue}
-                    disabled={!openrouterKey.trim()}
+                    disabled={!openrouterKey.trim() || isProcessing}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
-                        if (latestDraft && latestDraft.isAwaitingFeedback) {
-                          handleRevise(inputValue, null, false);
-                          setInputValue('');
-                        } else {
-                          handleSendPrompt();
-                        }
+                        handleSendButtonPress();
                       }
                     }}
                     className="w-full max-h-40 min-h-[44px] bg-transparent resize-none px-3 py-3 text-[15px] text-zinc-100 outline-none placeholder-zinc-500 leading-relaxed overflow-y-auto disabled:opacity-50"
                   />
 
-                  {latestDraft && latestDraft.isAwaitingFeedback ? (
-                    <div className="flex items-center gap-2 pr-1 pb-1">
-                      <button 
-                        onClick={() => { handleRevise(inputValue, null, false); setInputValue(''); }}
-                        disabled={!inputValue.trim() || isProcessing}
-                        className="bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-zinc-200 px-3 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-1.5"
-                      >
-                        <RefreshCw size={16} /> Global Revise
-                      </button>
-                      <button 
-                        onClick={() => { handleRevise('', null, true); setInputValue(''); }}
-                        disabled={isProcessing}
-                        className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 px-3 py-2 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1.5"
-                      >
-                        <CheckCircle size={16} /> Approve All
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="pr-1 pb-1">
-                      <button 
-                        onClick={handleSendPrompt}
-                        disabled={!inputValue.trim() || isProcessing || !openrouterKey.trim()}
-                        className={`p-2 rounded-xl transition-all flex items-center justify-center ${
-                          inputValue.trim() && !isProcessing && openrouterKey.trim()
-                            ? 'bg-white text-black hover:bg-zinc-200 shadow-md' 
-                            : 'bg-zinc-700/50 text-zinc-500 cursor-not-allowed'
-                        }`}
-                      >
-                        <ArrowUp size={20} strokeWidth={2.5} />
-                      </button>
-                    </div>
-                  )}
+                  <div className="pr-1 pb-1">
+                    <button 
+                      onClick={handleSendButtonPress}
+                      disabled={!inputValue.trim() || isProcessing || !openrouterKey.trim()}
+                      className={`p-2 rounded-xl transition-all flex items-center justify-center ${
+                        inputValue.trim() && !isProcessing && openrouterKey.trim()
+                          ? 'bg-white text-black hover:bg-zinc-200 shadow-md' 
+                          : 'bg-zinc-700/50 text-zinc-500 cursor-not-allowed'
+                      }`}
+                    >
+                      <ArrowUp size={20} strokeWidth={2.5} />
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

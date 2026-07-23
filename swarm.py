@@ -430,7 +430,11 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
 
     duration = round(time.time() - _t_start, 1)
     print(f"[WORKER:{role}] {status} in {duration}s ({len(output)} chars)")
-    _sync_emit(ws_session_id, "agent_done", {"role": role, "duration": duration})
+    _sync_emit(ws_session_id, "agent_done", {
+        "role": role,
+        "duration": duration,
+        "tokens": {"prompt": prompt_tokens, "completion": completion_tokens}
+    })
     return {
         "previous_output": output,
         "worker_status": status,
@@ -519,6 +523,7 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
     prompt_tokens = w_tokens.get("prompt", 0) + c_prompt
     completion_tokens = w_tokens.get("completion", 0) + c_completion
     merged_tokens = {"prompt": prompt_tokens, "completion": completion_tokens}
+    _sync_emit(ws_session_id, "agent_critic_done", {"role": role, "tokens": merged_tokens})
 
     if review.startswith("APPROVED") or "approved" in review.lower()[:15]:
         _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🎉 Deliverable APPROVED by critic!\n"})
