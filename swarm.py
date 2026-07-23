@@ -85,6 +85,7 @@ class SwarmState(TypedDict):
     deliverables: Annotated[dict, operator.ior]
     agent_statuses: Annotated[dict, _merge_dicts]
     agent_durations: Annotated[dict, _merge_dicts]  # ponytail: {role: seconds_float}
+    agent_tokens: Annotated[dict, _merge_dicts]
     feedback_type: str
     target_agent: str
     guardrail_status: str
@@ -108,6 +109,7 @@ class WorkerState(TypedDict):
     approved_by_critic: bool
     worker_status: str
     worker_duration: float      # seconds taken by this worker
+    agent_tokens: dict
     deliverables: dict
     agent_statuses: dict
 
@@ -138,6 +140,18 @@ def invoke_llm_with_timeout(llm: Any, messages: list, timeout_seconds: float = 4
             return future.result(timeout=timeout_seconds)
         except concurrent.futures.TimeoutError:
             raise TimeoutError(f"API request timed out after {timeout_seconds} seconds.")
+
+def extract_tokens(response) -> dict:
+    """ponytail: Extracts prompt and completion token usage from LLM response metadata."""
+    try:
+        meta = getattr(response, "response_metadata", {}) or {}
+        usage = meta.get("token_usage") or {}
+        return {
+            "prompt": usage.get("prompt_tokens", 0),
+            "completion": usage.get("completion_tokens", 0)
+        }
+    except Exception:
+        return {"prompt": 0, "completion": 0}
 
 def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False) -> Any:
     """Returns an OpenRouter ChatOpenAI client using the free models router."""
@@ -364,10 +378,16 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
     _t_start = time.time()
     _sync_emit(ws_session_id, "agent_started", {"role": role, "task": task_desc[:120]})
     _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🚀 Starting task execution...\n"})
+    prompt_tokens = 0
+    completion_tokens = 0
     try:
         for _ in range(3):  # tool loop, max 3 turns
             response = invoke_llm_with_timeout(llm_with_tools, messages, timeout_seconds=45.0)
             messages.append(response)
+            t = extract_tokens(response)
+            prompt_tokens += t["prompt"]
+            completion_tokens += t["completion"]
+            
             if hasattr(response, 'tool_calls') and response.tool_calls:
                 for tc in response.tool_calls:
                     fn = tools_map.get(tc['name'])
@@ -379,7 +399,11 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
         # Ensure we have a plain-text final answer
         if not messages[-1].content or (hasattr(messages[-1], 'tool_calls') and messages[-1].tool_calls):
             _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🧠 Calling OpenRouter free model router...\n"})
-            output = invoke_llm_with_timeout(dyn_worker_llm, messages, timeout_seconds=45.0).content.strip()
+            final_resp = invoke_llm_with_timeout(dyn_worker_llm, messages, timeout_seconds=45.0)
+            t = extract_tokens(final_resp)
+            prompt_tokens += t["prompt"]
+            completion_tokens += t["completion"]
+            output = final_resp.content.strip()
         else:
             output = messages[-1].content.strip()
         _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "✅ Task completed. Preparing draft.\n"})
@@ -391,7 +415,11 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
         if "429" in err_str or "rate_limit" in err_str.lower():
             time.sleep(10)
             try:
-                output = dyn_worker_llm.invoke(messages).content.strip()
+                final_resp = dyn_worker_llm.invoke(messages)
+                t = extract_tokens(final_resp)
+                prompt_tokens += t["prompt"]
+                completion_tokens += t["completion"]
+                output = final_resp.content.strip()
                 status = "completed"
             except Exception as e2:
                 output = f"⚠️ **Rate Limit:** Provider overloaded. Request a targeted revision to retry.\n\n`{str(e2)[:200]}`"
@@ -407,6 +435,7 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
         "previous_output": output,
         "worker_status": status,
         "worker_duration": duration,
+        "agent_tokens": {"prompt": prompt_tokens, "completion": completion_tokens},
         "deliverables": {role: output},
         "agent_statuses": {role: status},
         "approved_by_critic": False,
@@ -429,7 +458,8 @@ def critic_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
             "approved_by_critic": True,
             "critic_feedback": "",
             "deliverables": {role: output},
-            "agent_statuses": {role: "error"}
+            "agent_statuses": {role: "error"},
+            "agent_tokens": state.get("agent_tokens") or {"prompt": 0, "completion": 0}
         }
 
     critic_prompt = f"""You are the Lead Quality Assurance and Critic Agent for an AI Swarm.
@@ -470,14 +500,25 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
     ws_session_id = (config or {}).get("configurable", {}).get("ws_session_id", "")
     _sync_emit(ws_session_id, "agent_critic_reviewing", {"role": role})
     _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🧐 Submitting draft to Lead Critic for review...\n"})
+    
+    c_prompt = 0
+    c_completion = 0
     try:
         response = invoke_llm_with_timeout(dyn_critic_llm, messages, timeout_seconds=45.0)
         review = response.content.strip()
+        t = extract_tokens(response)
+        c_prompt = t["prompt"]
+        c_completion = t["completion"]
         _sync_emit(ws_session_id, "agent_token", {"role": role, "token": f"📝 Critic review response received.\n"})
         print(f"[CRITIC:{role}] Review complete:\n{review[:200]}...")
     except Exception as e:
         print(f"[CRITIC:{role}] Review failed: {e}. Defaulting to APPROVED.")
         review = "APPROVED"
+
+    w_tokens = state.get("agent_tokens") or {"prompt": 0, "completion": 0}
+    prompt_tokens = w_tokens.get("prompt", 0) + c_prompt
+    completion_tokens = w_tokens.get("completion", 0) + c_completion
+    merged_tokens = {"prompt": prompt_tokens, "completion": completion_tokens}
 
     if review.startswith("APPROVED") or "approved" in review.lower()[:15]:
         _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🎉 Deliverable APPROVED by critic!\n"})
@@ -485,7 +526,8 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
             "approved_by_critic": True,
             "critic_feedback": "",
             "deliverables": {role: output},
-            "agent_statuses": {role: "completed"}
+            "agent_statuses": {role: "completed"},
+            "agent_tokens": merged_tokens
         }
     else:
         # Extract revision feedback
@@ -503,7 +545,8 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
             "internal_revision_count": revision_count + 1,
             # Render the intermediate draft + critique so it can be seen
             "deliverables": {role: f"{output}\n\n*Reviewer Feedback (Internal Revision {revision_count + 1}):*\n{feedback}"},
-            "agent_statuses": {role: "working"}
+            "agent_statuses": {role: "working"},
+            "agent_tokens": merged_tokens
         }
 
 
@@ -558,6 +601,7 @@ def worker_subgraph_node(state: WorkerState, config: RunnableConfig = None) -> d
         "deliverables":    {role: final.get("previous_output", "")},
         "agent_statuses":  {role: final.get("worker_status", "completed")},
         "agent_durations": {role: final.get("worker_duration", 0.0)},
+        "agent_tokens":    {role: final.get("agent_tokens", {"prompt": 0, "completion": 0})},
     }
 
 
@@ -591,6 +635,7 @@ def assign_workers(state: SwarmState) -> list[Send]:
                 "worker_status":           "",
                 "deliverables":            {},
                 "agent_statuses":          {},
+                "agent_tokens":            {"prompt": 0, "completion": 0},
             },
         )
         for task in state["execution_plan"]
@@ -630,6 +675,7 @@ def route_feedback(state: SwarmState):
                     "worker_status":           "",
                     "deliverables":            {},
                     "agent_statuses":          {},
+                    "agent_tokens":            {"prompt": 0, "completion": 0},
                 }
             )
         ]

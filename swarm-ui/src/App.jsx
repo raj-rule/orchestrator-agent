@@ -5,7 +5,7 @@ import { Search, PenTool, Image as ImageIcon, ArrowUp, Paperclip, Bot, User, Che
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const LoadingSkeleton = ({ agentStatuses = {}, agentDurations = {} }) => {
+const LoadingSkeleton = ({ agentStatuses = {}, agentDurations = {}, agentTokens = {} }) => {
   const activeCount = Object.values(agentStatuses).filter(s => s === 'working').length;
   const completedCount = Object.values(agentStatuses).filter(s => s === 'completed').length;
   const totalCount = Object.keys(agentStatuses).length;
@@ -39,6 +39,9 @@ const LoadingSkeleton = ({ agentStatuses = {}, agentDurations = {} }) => {
                 <div className="flex items-center gap-2">
                   {agentDurations[role] && (
                     <span className="text-[10px] text-zinc-500 tabular-nums">⏱ {agentDurations[role]}s</span>
+                  )}
+                  {agentTokens[role] && (agentTokens[role].prompt > 0 || agentTokens[role].completion > 0) && (
+                    <span className="text-[10px] text-zinc-500 font-mono">({agentTokens[role].prompt + agentTokens[role].completion} t)</span>
                   )}
                   <span className={`text-[10px] uppercase tracking-tighter font-bold ${
                     status === 'working' ? 'text-amber-400 animate-pulse' : 'text-emerald-500'
@@ -149,6 +152,7 @@ export default function App() {
   };
   const [agentStatuses, setAgentStatuses] = useState({});
   const [agentDurations, setAgentDurations] = useState({});
+  const [agentTokens, setAgentTokens] = useState({});
 
   // LLM Key states
   const [provider, setProvider] = useState('openrouter');
@@ -382,6 +386,7 @@ export default function App() {
       setIsProcessing(false);
       if (data.agent_statuses) setAgentStatuses(data.agent_statuses);
       if (data.agent_durations) setAgentDurations(data.agent_durations);
+      if (data.agent_tokens) setAgentTokens(data.agent_tokens);
 
       if (data.conversational_reply) {
         setMessages(prev => [
@@ -507,6 +512,7 @@ export default function App() {
         const data = await response.json();
         if (data.agent_statuses) setAgentStatuses(data.agent_statuses);
         if (data.agent_durations) setAgentDurations(data.agent_durations);
+        if (data.agent_tokens) setAgentTokens(data.agent_tokens);
 
         if (data.status === 'processing') {
           // ponytail: recover active run state on reload
@@ -582,6 +588,9 @@ export default function App() {
     setIsProcessing(true);
     setActiveView('main');
     setLiveAgents([]);
+    setAgentStatuses({});
+    setAgentDurations({});
+    setAgentTokens({});
     setTerminalVisible(true);
 
     // Encode attached file as base64 if present
@@ -1104,7 +1113,7 @@ export default function App() {
                   ))}
 
                   {/* Engaging Loading State */}
-                  {isProcessing && <LoadingSkeleton agentStatuses={agentStatuses} agentDurations={agentDurations} />}
+                  {isProcessing && <LoadingSkeleton agentStatuses={agentStatuses} agentDurations={agentDurations} agentTokens={agentTokens} />}
                 </AnimatePresence>
                 <div ref={messagesEndRef} className="h-4" />
               </div>
@@ -1243,7 +1252,21 @@ export default function App() {
                       <Bot size={24} className="text-zinc-350" />
                     </div>
                     <div>
-                      <h2 className="text-2xl font-semibold text-zinc-100">{activeView}</h2>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="text-2xl font-semibold text-zinc-100">{activeView}</h2>
+                        {agentDurations[activeView] && (
+                          <span className="text-[10px] bg-zinc-800 border border-white/5 text-zinc-400 px-2 py-0.5 rounded-full font-mono flex items-center gap-1 shadow-sm">
+                            ⏱️ {agentDurations[activeView]}s
+                          </span>
+                        )}
+                        {agentTokens[activeView] && (agentTokens[activeView].prompt > 0 || agentTokens[activeView].completion > 0) && (
+                          <span className="text-[10px] bg-zinc-800 border border-white/5 text-emerald-400 px-2 py-0.5 rounded-full font-mono flex items-center gap-1.5 shadow-sm">
+                            <span>📥 {agentTokens[activeView].prompt} in</span>
+                            <span className="text-zinc-700">|</span>
+                            <span>📤 {agentTokens[activeView].completion} out</span>
+                          </span>
+                        )}
+                      </div>
                       <p className="text-sm text-zinc-500 mt-0.5">
                         {latestDraft?.content?.executionPlan?.find(t => t.agent_role === activeView)?.task_description
                           ? latestDraft.content.executionPlan.find(t => t.agent_role === activeView).task_description.slice(0, 120) + (latestDraft.content.executionPlan.find(t => t.agent_role === activeView).task_description.length > 120 ? '…' : '')

@@ -102,6 +102,7 @@ class StartResponse(BaseModel):
     execution_plan: list[dict]
     agent_statuses: dict[str, str]
     agent_durations: dict[str, float] = Field(default_factory=dict)
+    agent_tokens: dict[str, dict] = Field(default_factory=dict)
 
 class FeedbackResponse(BaseModel):
     status: Literal["completed", "pending_review"]
@@ -109,6 +110,7 @@ class FeedbackResponse(BaseModel):
     execution_plan: list[dict]
     agent_statuses: dict[str, str]
     agent_durations: dict[str, float] = Field(default_factory=dict)
+    agent_tokens: dict[str, dict] = Field(default_factory=dict)
 
 class SessionResponse(BaseModel):
     status: Literal["completed", "pending_review", "processing"]
@@ -116,6 +118,7 @@ class SessionResponse(BaseModel):
     execution_plan: list[dict]
     agent_statuses: dict[str, str]
     agent_durations: dict[str, float] = Field(default_factory=dict)
+    agent_tokens: dict[str, dict] = Field(default_factory=dict)
 
 class VerifyKeyRequest(BaseModel):
     key: str
@@ -209,6 +212,7 @@ async def start_swarm(
             "execution_plan": state_snapshot.values.get("execution_plan", []),
             "agent_statuses": state_snapshot.values.get("agent_statuses", {}),
             "agent_durations": state_snapshot.values.get("agent_durations", {}),
+            "agent_tokens": state_snapshot.values.get("agent_tokens", {}),
         }
     except Exception:
         return {
@@ -217,6 +221,7 @@ async def start_swarm(
             "execution_plan": [],
             "agent_statuses": {},
             "agent_durations": {},
+            "agent_tokens": {},
         }
 
 @app.post("/api/feedback", tags=["Swarm Lifecycle"], summary="Submit HITL Feedback", response_model=FeedbackResponse)
@@ -269,6 +274,7 @@ async def provide_feedback(
             "execution_plan": state_snapshot.values.get("execution_plan", []),
             "agent_statuses": state_snapshot.values.get("agent_statuses", {}),
             "agent_durations": state_snapshot.values.get("agent_durations", {}),
+            "agent_tokens": state_snapshot.values.get("agent_tokens", {}),
         }
 
     file_content = await extract_text(file) if file else ""
@@ -319,6 +325,7 @@ async def provide_feedback(
             "execution_plan": new_snapshot.values.get("execution_plan", []),
             "agent_statuses": new_snapshot.values.get("agent_statuses", {}),
             "agent_durations": new_snapshot.values.get("agent_durations", {}),
+            "agent_tokens": new_snapshot.values.get("agent_tokens", {}),
         }
     except Exception:
         return {
@@ -327,6 +334,7 @@ async def provide_feedback(
             "execution_plan": [],
             "agent_statuses": {},
             "agent_durations": {},
+            "agent_tokens": {},
         }
 
 class SessionCreateResponse(BaseModel):
@@ -365,6 +373,7 @@ async def get_session(session_id: str, x_backend_token: Optional[str] = Header(N
         "execution_plan": state_snapshot.values.get("execution_plan", []),
         "agent_statuses": state_snapshot.values.get("agent_statuses", {}),
         "agent_durations": state_snapshot.values.get("agent_durations", {}),
+        "agent_tokens": state_snapshot.values.get("agent_tokens", {}),
     }
 
 # ── Mount Socket.IO under /ws (existing /api routes are untouched) ────────────
@@ -482,6 +491,7 @@ async def start_campaign(sid, data: dict):
             "execution_plan":  state_snapshot.values.get("execution_plan", []),
             "agent_statuses":  state_snapshot.values.get("agent_statuses", {}),
             "agent_durations": agent_durations,
+            "agent_tokens":    state_snapshot.values.get("agent_tokens", {}),
         })
     except Exception as e:
         await emit_to_session(verified_session_id, "swarm_error", {"message": str(e)})
@@ -633,6 +643,7 @@ Agent Deliverables:
                 "execution_plan": state_snapshot.values.get("execution_plan", []),
                 "agent_statuses": state_snapshot.values.get("agent_statuses", {}),
                 "agent_durations": state_snapshot.values.get("agent_durations", {}),
+                "agent_tokens": state_snapshot.values.get("agent_tokens", {}),
                 "conversational_reply": reply_content
             })
             return
@@ -677,6 +688,7 @@ Agent Deliverables:
             "execution_plan":  new_snapshot.values.get("execution_plan", []),
             "agent_statuses":  new_snapshot.values.get("agent_statuses", {}),
             "agent_durations": new_snapshot.values.get("agent_durations", {}),
+            "agent_tokens":    new_snapshot.values.get("agent_tokens", {}),
         })
     except Exception as e:
         await emit_to_session(verified_session_id, "swarm_error", {"message": str(e)})
