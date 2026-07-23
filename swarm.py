@@ -133,13 +133,30 @@ tools_list = [tavily_tool, read_brand_guidelines]
 import concurrent.futures
 
 def invoke_llm_with_timeout(llm: Any, messages: list, timeout_seconds: float = 45.0) -> Any:
-    """ponytail: Strictly enforce execution timeout on LLM calls to bypass proxy hangs."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(llm.invoke, messages)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(f"API request timed out after {timeout_seconds} seconds.")
+    """ponytail: Strictly enforce execution timeout on LLM calls with automatic retries."""
+    max_retries = 3
+    base_timeout = timeout_seconds
+    
+    for attempt in range(max_retries):
+        current_timeout = base_timeout + (attempt * 15.0)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(llm.invoke, messages)
+            try:
+                return future.result(timeout=current_timeout)
+            except concurrent.futures.TimeoutError:
+                print(f"[LLM TIMEOUT] Attempt {attempt + 1}/{max_retries} timed out after {current_timeout}s.")
+                if attempt == max_retries - 1:
+                    raise TimeoutError(f"API request timed out after {current_timeout} seconds.")
+                time.sleep(1.5)
+            except Exception as e:
+                err_msg = str(e)
+                print(f"[LLM ERROR] Attempt {attempt + 1}/{max_retries} failed with error: {err_msg}")
+                if "429" in err_msg or "rate" in err_msg.lower() or "overloaded" in err_msg.lower():
+                    if attempt == max_retries - 1:
+                        raise e
+                    time.sleep(2.0 * (attempt + 1))
+                else:
+                    raise e
 
 def extract_tokens(response) -> dict:
     """ponytail: Extracts prompt and completion token usage from LLM response metadata."""
@@ -154,7 +171,7 @@ def extract_tokens(response) -> dict:
         return {"prompt": 0, "completion": 0}
 
 def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False) -> Any:
-    """Returns an OpenRouter ChatOpenAI client using the free models router."""
+    """Returns an OpenRouter ChatOpenAI client using a fast free Gemini model."""
     configurable = config.get("configurable", {}) if config else {}
     openrouter_key = (configurable.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY") or "").strip()
     temp = 0.2 if is_orchestrator else 0.7
@@ -166,7 +183,7 @@ def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False)
     return ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=openrouter_key,
-        model="openrouter/free",  # ponytail: zero-cost free model router
+        model="google/gemini-2.5-flash:free",  # ponytail: extremely fast, high-quality free Gemini model
         temperature=temp,
         timeout=45.0,             # ponytail: prevent indefinite hangs on congested free models
     )
@@ -392,7 +409,14 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
                 for tc in response.tool_calls:
                     fn = tools_map.get(tc['name'])
                     _sync_emit(ws_session_id, "agent_token", {"role": role, "token": f"⚙️ Calling tool {tc['name']}...\n"})
-                    result = fn.invoke(tc['args']) if fn else f"Tool {tc['name']} not found"
+                    try:
+                        if fn:
+                            result = fn.invoke(tc['args'])
+                        else:
+                            result = f"Tool {tc['name']} not found"
+                    except Exception as tool_err:
+                        print(f"Tool calling error: {tool_err}")
+                        result = f"Error executing tool {tc['name']}: {tool_err}"
                     messages.append(ToolMessage(content=str(result), name=tc['name'], tool_call_id=tc['id']))
             else:
                 break

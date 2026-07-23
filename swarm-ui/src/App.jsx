@@ -56,6 +56,93 @@ const BehindTheScenesAccordion = ({ content }) => {
   );
 };
 
+const BotAnimation = () => {
+  return (
+    <div className="flex flex-col items-center justify-center p-6 bg-zinc-950/40 border border-white/5 rounded-2xl mb-4 relative overflow-hidden">
+      <style>{`
+        @keyframes dash-pulse {
+          to {
+            stroke-dashoffset: -20;
+          }
+        }
+        @keyframes glow-pulse {
+          0%, 100% { transform: scale(1); filter: drop-shadow(0 0 2px rgba(16, 185, 129, 0.4)); }
+          50% { transform: scale(1.06); filter: drop-shadow(0 0 10px rgba(16, 185, 129, 0.7)); }
+        }
+        .animate-dash-pulse {
+          stroke-dasharray: 4, 4;
+          animation: dash-pulse 1.2s linear infinite;
+        }
+        .animate-glow-pulse {
+          transform-origin: center;
+          animation: glow-pulse 2.5s ease-in-out infinite;
+        }
+      `}</style>
+      
+      {/* Background grid lines */}
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff03_1px,transparent_1px),linear-gradient(to_bottom,#ffffff03_1px,transparent_1px)] bg-[size:14px_24px] pointer-events-none" />
+      
+      <svg width="160" height="160" viewBox="0 0 200 200" className="relative z-10">
+        <defs>
+          <radialGradient id="centerGlow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#10b981" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+
+        {/* Glowing Background Radial */}
+        <circle cx="100" cy="100" r="70" fill="url(#centerGlow)" className="animate-pulse" />
+
+        {/* Orbiting rings */}
+        <circle cx="100" cy="100" r="60" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
+        <circle cx="100" cy="100" r="40" fill="none" stroke="rgba(16, 185, 129, 0.05)" strokeWidth="1" strokeDasharray="4 4" className="animate-spin" style={{ animationDuration: '40s' }} />
+
+        {/* Connection lines to worker nodes */}
+        {/* Node 1: Top Left */}
+        <line x1="100" y1="100" x2="50" y2="60" stroke="#10b981" strokeWidth="1.5" strokeOpacity="0.4" className="animate-dash-pulse" />
+        {/* Node 2: Top Right */}
+        <line x1="100" y1="100" x2="150" y2="60" stroke="#10b981" strokeWidth="1.5" strokeOpacity="0.4" className="animate-dash-pulse" style={{ animationDelay: '0.5s' }} />
+        {/* Node 3: Bottom Center */}
+        <line x1="100" y1="100" x2="100" y2="160" stroke="#10b981" strokeWidth="1.5" strokeOpacity="0.4" className="animate-dash-pulse" style={{ animationDelay: '1s' }} />
+
+        {/* Outer Orbiting Particles / Small Nodes */}
+        {/* Top Left Node */}
+        <g className="animate-bounce" style={{ animationDuration: '4s' }}>
+          <circle cx="50" cy="60" r="6" fill="#18181b" stroke="#10b981" strokeWidth="1.5" />
+          <circle cx="50" cy="60" r="2" fill="#10b981" />
+        </g>
+        
+        {/* Top Right Node */}
+        <g className="animate-bounce" style={{ animationDuration: '3.5s', animationDelay: '0.7s' }}>
+          <circle cx="150" cy="60" r="6" fill="#18181b" stroke="#10b981" strokeWidth="1.5" />
+          <circle cx="150" cy="60" r="2" fill="#10b981" />
+        </g>
+
+        {/* Bottom Center Node */}
+        <g className="animate-bounce" style={{ animationDuration: '4.5s', animationDelay: '1.2s' }}>
+          <circle cx="100" cy="160" r="6" fill="#18181b" stroke="#10b981" strokeWidth="1.5" />
+          <circle cx="100" cy="160" r="2" fill="#10b981" />
+        </g>
+
+        {/* Central Orchestrator Node */}
+        <g className="animate-glow-pulse">
+          <circle cx="100" cy="100" r="22" fill="#09090b" stroke="#10b981" strokeWidth="2" />
+          {/* Inner details resembling a microchip/brain */}
+          <path d="M92,92 L108,92 L108,108 L92,108 Z" fill="none" stroke="rgba(16, 185, 129, 0.4)" strokeWidth="1" />
+          <line x1="90" y1="100" x2="110" y2="100" stroke="#10b981" strokeWidth="1.5" />
+          <line x1="100" y1="90" x2="100" y2="110" stroke="#10b981" strokeWidth="1.5" />
+          <circle cx="100" cy="100" r="4" fill="#10b981" />
+        </g>
+      </svg>
+      
+      <div className="text-xs font-semibold text-zinc-400 mt-2 tracking-wide uppercase flex items-center gap-1.5">
+        <Bot size={13} className="text-emerald-400 animate-pulse" />
+        Orchestrator Network Sync
+      </div>
+    </div>
+  );
+};
+
 const LiveSwarmStory = ({ liveAgents = [], elapsedTime = 0, agentTokens = {} }) => {
   return (
     <motion.div 
@@ -63,6 +150,7 @@ const LiveSwarmStory = ({ liveAgents = [], elapsedTime = 0, agentTokens = {} }) 
       animate={{ opacity: 1, y: 0 }}
       className="bg-zinc-900/50 border border-white/10 rounded-2xl p-5 my-5 space-y-4 shadow-xl max-w-xl"
     >
+      <BotAnimation />
       <div className="flex items-center justify-between border-b border-white/5 pb-3">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
