@@ -13,22 +13,25 @@ from typing import Annotated, Any, List, TypedDict, Literal
 from pydantic import BaseModel, Field
 
 from dotenv import load_dotenv
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_tavily import TavilySearch
 
 load_dotenv()
 
 import asyncio as _asyncio
+
+_main_loop = None
+
+def set_main_loop(loop):
+    global _main_loop
+    _main_loop = loop
 
 def _sync_emit(session_id: str, event: str, data: dict) -> None:
     """
@@ -36,14 +39,14 @@ def _sync_emit(session_id: str, event: str, data: dict) -> None:
     Works because FastAPI's event loop runs in the main thread while
     LangGraph nodes run in a thread-pool executor (run_in_executor).
     """
-    if not session_id:
+    if not session_id or _main_loop is None:
         return
     try:
         from socket_server import emit_to_session
-        loop = _asyncio.get_event_loop()
-        _asyncio.run_coroutine_threadsafe(emit_to_session(session_id, event, data), loop)
+        _asyncio.run_coroutine_threadsafe(emit_to_session(session_id, event, data), _main_loop)
     except Exception as exc:
         print(f"[WS EMIT ERROR] {exc}")
+
 
 
 # ==========================================
@@ -79,23 +82,12 @@ class SwarmState(TypedDict):
 
     # ── Orchestrator outputs ─────────────────────────────────────
     execution_plan: list[dict]
-    # Each dict: { agent_role: str, task_description: str, status: str }
-
-    # Annotated with operator.ior so parallel workers safely merge results
-    # instead of the last writer silently overwriting the others.
     deliverables: Annotated[dict, operator.ior]
     agent_statuses: Annotated[dict, _merge_dicts]
+    agent_durations: Annotated[dict, _merge_dicts]  # ponytail: {role: seconds_float}
     feedback_type: str
     target_agent: str
     guardrail_status: str
-
-    # ── Legacy creative-pipeline fields (Phase 1 backward-compat) ─
-    # Kept so server.py can still read slogan_draft / image_prompt_draft
-    # without modification.  Will be retired in a later phase.
-    slogan_draft: str
-    image_prompt_draft: str
-    internal_feedback: str
-    current_draft: dict
     feedback: str
     revision_count: int
     messages: Annotated[list[AnyMessage], add_messages]
@@ -104,111 +96,66 @@ class SwarmState(TypedDict):
 
 class WorkerState(TypedDict):
     """Scoped state passed to each dynamically-spawned worker via Send."""
-    agent_role: str        # e.g. 'Market Strategist', 'CTO'
-    task_description: str  # The specific deliverable this worker must produce
-    task_prompt: str       # Overarching startup request (context)
-    guidelines_path: str   # Path to brand-guidelines file
+    agent_role: str
+    task_description: str
+    task_prompt: str
+    guidelines_path: str
     feedback: str
     feedback_type: str
     previous_output: str
     critic_feedback: str
     internal_revision_count: int
     approved_by_critic: bool
-    # Tracked inside the subgraph; merged back into SwarmState by the wrapper
-    worker_status: str          # 'completed' | 'error'
-    deliverables: dict          # {role: output}  (single-writer inside subgraph)
-    agent_statuses: dict        # {role: status}  (single-writer inside subgraph)
+    worker_status: str
+    worker_duration: float      # seconds taken by this worker
+    deliverables: dict
+    agent_statuses: dict
 
 
 # ==========================================
-# 2. THE LOCAL LLM & TOOLS  (legacy worker pipeline)
+# 2. TOOLS
 # ==========================================
-llm = ChatOpenAI(
-    base_url="http://localhost:1234/v1",
-    api_key="lm-studio",
-    temperature=0.7,
-)
-
 tavily_tool = TavilySearch(max_results=3)
 
 @tool
 def read_brand_guidelines(file_path: str) -> str:
-    """Reads the contents of the brand guidelines text file.
-    Use this tool to ingest client constraints before generating the draft.
-    INPUT: The path to the file, e.g., 'brand_guidelines.txt'."""
+    """Reads the brand guidelines file. INPUT: file path string."""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
-    except FileNotFoundError:
-        return f"Error: File '{file_path}' not found."
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        return f"Error: {e}"
 
 tools_list = [tavily_tool, read_brand_guidelines]
-llm_with_tools = llm.bind_tools(tools_list)
 
+import concurrent.futures
 
-# ==========================================
-# 3. GROQ ORCHESTRATOR LLM (Legacy globals)
-# ==========================================
-orchestrator_llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    temperature=0.2,
-    max_retries=3
-)
+def invoke_llm_with_timeout(llm: Any, messages: list, timeout_seconds: float = 45.0) -> Any:
+    """ponytail: Strictly enforce execution timeout on LLM calls to bypass proxy hangs."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(llm.invoke, messages)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"API request timed out after {timeout_seconds} seconds.")
 
-local_llm = ChatOpenAI(
-    base_url="http://localhost:1234/v1",
-    api_key="lm-studio",
-    temperature=0.7,
-)
-
-# ── Dynamic Model Client Factory ──────────────────────────────────
 def get_llm_client(config: RunnableConfig = None, is_orchestrator: bool = False) -> Any:
-    """
-    Dynamically instantiates the LLM client based on the provided configuration.
-    If provider and keys are missing from config, it falls back to environment variables.
-    """
+    """Returns an OpenRouter ChatOpenAI client using the free models router."""
     configurable = config.get("configurable", {}) if config else {}
-    provider = configurable.get("llm_provider", "").lower()
-    
-    # Retrieve keys from config
-    groq_key = configurable.get("groq_api_key") or os.getenv("GROQ_API_KEY")
-    gemini_key = configurable.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
-    openrouter_key = configurable.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")
-
-    if provider == "groq" and groq_key:
-        model = "llama-3.3-70b-versatile" if is_orchestrator else "llama-3.1-8b-instant"
-        # Cap max_tokens for workers to reduce TPM usage and avoid rate limits
-        extra = {"max_tokens": 2048} if is_orchestrator else {"max_tokens": 1024}
-        return ChatGroq(model=model, api_key=groq_key, temperature=0.2 if is_orchestrator else 0.7, **extra)
-        
-    elif provider == "gemini" and gemini_key:
-        model = "gemini-1.5-flash"
-        return ChatGoogleGenerativeAI(model=model, google_api_key=gemini_key, temperature=0.2 if is_orchestrator else 0.7)
-        
-    elif provider == "openrouter" and openrouter_key:
-        # openrouter/free — routes to the best available free model on OpenRouter.
-        model = "openrouter/free"
-        return ChatOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=openrouter_key,
-            model=model,
-            temperature=0.2 if is_orchestrator else 0.7
+    openrouter_key = (configurable.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY") or "").strip()
+    temp = 0.2 if is_orchestrator else 0.7
+    if not openrouter_key:
+        raise ValueError(
+            "OpenRouter API Key not found. Please click the Settings gear icon (⚙️) "
+            "in the top-right corner of the page and paste a valid OpenRouter API Key."
         )
-    
-    # Fallbacks to env variables directly
-    if os.getenv("GROQ_API_KEY"):
-        model = "llama-3.3-70b-versatile" if is_orchestrator else "llama-3.1-8b-instant"
-        return ChatGroq(model=model, api_key=os.getenv("GROQ_API_KEY"), temperature=0.2 if is_orchestrator else 0.7)
-    elif os.getenv("GEMINI_API_KEY"):
-        return ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.getenv("GEMINI_API_KEY"), temperature=0.2 if is_orchestrator else 0.7)
-    
-    # Default backups
-    if is_orchestrator:
-        return orchestrator_llm
-    else:
-        return local_llm
+    return ChatOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=openrouter_key,
+        model="openrouter/free",  # ponytail: zero-cost free model router
+        temperature=temp,
+        timeout=45.0,             # ponytail: prevent indefinite hangs on congested free models
+    )
 
 
 # ── Guardrails Safety Verification Node ────────────────────────────
@@ -272,7 +219,7 @@ Correct Action: The request is about copy. You already have a Copywriter. You MU
     dyn_orchestrator_llm = get_llm_client(config, is_orchestrator=True)
     structured_llm = dyn_orchestrator_llm.with_structured_output(OrchestratorPlan)
     try:
-        result = structured_llm.invoke(messages)
+        result = invoke_llm_with_timeout(structured_llm, messages, timeout_seconds=45.0)
         
         print("\n=== ORCHESTRATOR BRAIN DUMP ===")
         for assignment in result.assignments:
@@ -401,16 +348,8 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
     # Workers use dynamic LLM client
     dyn_worker_llm = get_llm_client(config, is_orchestrator=False)
 
-    # Only bind tools for providers that support tool-use on their models.
-    # OpenRouter free-tier Llama models do NOT support tool use — binding tools
-    # causes a 404 "No endpoints found that support tool use" error.
-    configurable = config.get("configurable", {}) if config else {}
-    provider = configurable.get("llm_provider", "").lower()
-    # openrouter/auto may route to models that support tool use — allow it.
-    # If the routed model doesn't support tools, the except block will retry without them.
-    tools_supported = provider in ("groq", "gemini", "openrouter") or (
-        provider == "" and (os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY"))
-    )
+    # Try tool binding; if the routed model rejects it the except block retries without tools.
+    tools_supported = True  # ponytail: attempt tools; catch error on 404
 
     tools_map = {t.name: t for t in tools_list}
     llm_with_tools = dyn_worker_llm.bind_tools(tools_list) if tools_supported else dyn_worker_llm
@@ -420,67 +359,54 @@ def worker_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
         HumanMessage(content=f"Execute your assignment now. Be detailed and specific." + (" Use tools if needed." if tools_supported else "")),
     ]
 
-    print(f"\n[WORKER:{role}] Starting task... (dynamic LLM + tools)")
+    print(f"\n[WORKER:{role}] Starting task...")
     ws_session_id = (config or {}).get("configurable", {}).get("ws_session_id", "")
+    _t_start = time.time()
     _sync_emit(ws_session_id, "agent_started", {"role": role, "task": task_desc[:120]})
+    _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🚀 Starting task execution...\n"})
     try:
-        # Tool execution loop (up to 3 tool call turns)
-        for turn in range(3):
-            response = llm_with_tools.invoke(messages)
+        for _ in range(3):  # tool loop, max 3 turns
+            response = invoke_llm_with_timeout(llm_with_tools, messages, timeout_seconds=45.0)
             messages.append(response)
-            
             if hasattr(response, 'tool_calls') and response.tool_calls:
-                print(f"[WORKER:{role}] Tool calls detected: {[tc['name'] for tc in response.tool_calls]}")
-                for tool_call in response.tool_calls:
-                    name = tool_call['name']
-                    tool_to_run = tools_map.get(name)
-                    if tool_to_run:
-                        try:
-                            result = tool_to_run.invoke(tool_call['args'])
-                        except Exception as e:
-                            result = f"Error running tool {name}: {e}"
-                    else:
-                        result = f"Error: Tool {name} not found."
-                    
-                    from langchain_core.messages import ToolMessage
-                    messages.append(ToolMessage(content=str(result), name=name, tool_call_id=tool_call['id']))
+                for tc in response.tool_calls:
+                    fn = tools_map.get(tc['name'])
+                    _sync_emit(ws_session_id, "agent_token", {"role": role, "token": f"⚙️ Calling tool {tc['name']}...\n"})
+                    result = fn.invoke(tc['args']) if fn else f"Tool {tc['name']} not found"
+                    messages.append(ToolMessage(content=str(result), name=tc['name'], tool_call_id=tc['id']))
             else:
                 break
-        
-        # If the last message has tool calls or is not text, request final response
+        # Ensure we have a plain-text final answer
         if not messages[-1].content or (hasattr(messages[-1], 'tool_calls') and messages[-1].tool_calls):
-            final_response = dyn_worker_llm.invoke(messages)
-            output = final_response.content.strip()
+            _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🧠 Calling OpenRouter free model router...\n"})
+            output = invoke_llm_with_timeout(dyn_worker_llm, messages, timeout_seconds=45.0).content.strip()
         else:
             output = messages[-1].content.strip()
-
-        print(f"[WORKER:{role}] Done. ({len(output)} chars)")
+        _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "✅ Task completed. Preparing draft.\n"})
         status = "completed"
-        _sync_emit(ws_session_id, "agent_done", {"role": role, "output": output})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         err_str = str(e)
-        # Graceful retry once on rate-limit (429) errors with a short back-off
-        if "429" in err_str or "rate_limit" in err_str.lower() or "rate limit" in err_str.lower():
-            print(f"[WORKER:{role}] Rate limit hit, retrying after 10s...")
+        if "429" in err_str or "rate_limit" in err_str.lower():
             time.sleep(10)
             try:
-                response = dyn_worker_llm.invoke(messages)
-                output = response.content.strip()
-                print(f"[WORKER:{role}] Retry succeeded. ({len(output)} chars)")
+                output = dyn_worker_llm.invoke(messages).content.strip()
                 status = "completed"
             except Exception as e2:
-                print(f"Worker {role} retry also failed: {e2}")
-                output = f"⚠️ **Rate Limit:** The AI provider is temporarily overloaded. Please wait a moment and request a targeted revision to regenerate this agent's output."
+                output = f"⚠️ **Rate Limit:** Provider overloaded. Request a targeted revision to retry.\n\n`{str(e2)[:200]}`"
                 status = "error"
         else:
-            print(f"Worker {role} failed: {e}")
-            output = f"⚠️ **Agent Error:** This agent encountered an unexpected error.\n\n**Details:** `{err_str[:200]}`\n\nPlease request a targeted revision to try again."
+            output = f"⚠️ **Agent Error:** `{err_str[:300]}`\n\nRequest a targeted revision to retry."
             status = "error"
 
-    # Return updates to WorkerState and SwarmState
+    duration = round(time.time() - _t_start, 1)
+    print(f"[WORKER:{role}] {status} in {duration}s ({len(output)} chars)")
+    _sync_emit(ws_session_id, "agent_done", {"role": role, "duration": duration})
     return {
         "previous_output": output,
         "worker_status": status,
+        "worker_duration": duration,
         "deliverables": {role: output},
         "agent_statuses": {role: status},
         "approved_by_critic": False,
@@ -497,8 +423,8 @@ def critic_node(state: WorkerState, config: RunnableConfig = None) -> dict[str, 
     output = state["previous_output"]
     revision_count = state.get("internal_revision_count", 0)
 
-    # If the output is empty or contains system notice, skip review
-    if not output or "System Notice" in output:
+    # If the output is empty or contains system notice/agent error, skip review
+    if not output or "System Notice" in output or "Agent Error" in output or state.get("worker_status") == "error":
         return {
             "approved_by_critic": True,
             "critic_feedback": "",
@@ -543,15 +469,18 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
     print(f"\n[CRITIC:{role}] Reviewing deliverable...")
     ws_session_id = (config or {}).get("configurable", {}).get("ws_session_id", "")
     _sync_emit(ws_session_id, "agent_critic_reviewing", {"role": role})
+    _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🧐 Submitting draft to Lead Critic for review...\n"})
     try:
-        response = dyn_critic_llm.invoke(messages)
+        response = invoke_llm_with_timeout(dyn_critic_llm, messages, timeout_seconds=45.0)
         review = response.content.strip()
+        _sync_emit(ws_session_id, "agent_token", {"role": role, "token": f"📝 Critic review response received.\n"})
         print(f"[CRITIC:{role}] Review complete:\n{review[:200]}...")
     except Exception as e:
         print(f"[CRITIC:{role}] Review failed: {e}. Defaulting to APPROVED.")
         review = "APPROVED"
 
     if review.startswith("APPROVED") or "approved" in review.lower()[:15]:
+        _sync_emit(ws_session_id, "agent_token", {"role": role, "token": "🎉 Deliverable APPROVED by critic!\n"})
         return {
             "approved_by_critic": True,
             "critic_feedback": "",
@@ -567,6 +496,7 @@ Followed by a numbered list of clear, specific, and constructive instructions fo
                 feedback = feedback[1:].strip()
         
         print(f"[CRITIC:{role}] Rejected (Revision count: {revision_count + 1})")
+        _sync_emit(ws_session_id, "agent_token", {"role": role, "token": f"🔄 Deliverable REJECTED. Looping back for revision (count: {revision_count + 1}).\n"})
         return {
             "approved_by_critic": False,
             "critic_feedback": feedback,
@@ -621,21 +551,13 @@ worker_subgraph = _worker_sub.compile()
 
 
 def worker_subgraph_node(state: WorkerState, config: RunnableConfig = None) -> dict:
-    """
-    Thin wrapper invoked from the parent SwarmState graph.
-    Runs the full worker-critic revision loop via the compiled subgraph,
-    then returns *only* the keys present in SwarmState with proper reducers:
-      - deliverables  (Annotated with operator.ior)
-      - agent_statuses (Annotated with _merge_dicts)
-    """
-    sub_config = config or {}
-    final: WorkerState = worker_subgraph.invoke(state, config=sub_config)
+    """Runs isolated worker-critic loop; returns only SwarmState-annotated keys."""
+    final: WorkerState = worker_subgraph.invoke(state, config=config or {})
     role = final["agent_role"]
-    output = final.get("previous_output", "")
-    status = final.get("worker_status", "completed")
     return {
-        "deliverables":   {role: output},
-        "agent_statuses": {role: status},
+        "deliverables":    {role: final.get("previous_output", "")},
+        "agent_statuses":  {role: final.get("worker_status", "completed")},
+        "agent_durations": {role: final.get("worker_duration", 0.0)},
     }
 
 
@@ -718,254 +640,48 @@ def route_feedback(state: SwarmState):
 
 
 # ==========================================
-# 5. LEGACY CREATIVE PIPELINE NODES
+# 6. HITL PASS-THROUGH NODE
 # ==========================================
-def copywriter_node(state: SwarmState):
-    msgs = state.get("messages", [])
-    g_path = state.get('guidelines_path', 'brand_guidelines.txt')
-    internal_fb = state.get("internal_feedback", "")
-    feedback = state.get("feedback", "")
-
-    # Surface the canonical user task from the new field name
-    task = state.get("task_prompt", "")
-
-    feedback_block = ""
-    if feedback and "HITL_APPROVED" not in feedback:
-        feedback_block = (
-            f"\n\n<CRITICAL_HUMAN_FEEDBACK>\n{feedback}\n</CRITICAL_HUMAN_FEEDBACK>\n"
-            "WARNING: You MUST apply the feedback above immediately. If the user asks for a color change "
-            "(e.g., 'rose-gold'), you MUST include it and overwrite previous colors."
-        )
-
-    sys_msg_content = (
-        "You are an Expert Copywriter. "
-        "Your ONLY job is to write a catchy marketing slogan for the user's task. "
-        "You have access to the tavily_search_results_json tool to identify current trends, "
-        f"and the read_brand_guidelines tool to read client constraints from: {g_path}. "
-        "CRITICAL INSTRUCTION: The constraints found in the Brand Guidelines (via the read_brand_guidelines tool) are ABSOLUTE. "
-        "They overrule all other instructions. If the user's task requests elements that violate the Brand Guidelines, "
-        "you MUST adapt the concept to fit the guidelines. (e.g., If the user asks for a forest, but guidelines ban nature, "
-        "you must design a digital or urban equivalent). Never ignore the brand rules. "
-        "You MUST wrap your final slogan in `<slogan>...</slogan>` tags. "
-        "Do NOT write an image prompt."
-        + feedback_block
-    )
-
-    if not msgs:
-        sys_msg = SystemMessage(content=sys_msg_content)
-        human_msg = HumanMessage(content=f"Task: {task}")
-        response = llm_with_tools.invoke([sys_msg, human_msg])
-        return_msgs = [sys_msg, human_msg, response]
-    else:
-        if internal_fb:
-            fb_msg = HumanMessage(content=f"Art Director Feedback: {internal_fb}\nPlease revise your slogan.")
-            response = llm_with_tools.invoke(msgs + [fb_msg])
-            return_msgs = [fb_msg, response]
-        else:
-            response = llm_with_tools.invoke(msgs)
-            return_msgs = [response]
-
-    slogan = state.get("slogan_draft", "")
-    if response.content:
-        match = re.search(r'<slogan>(.*?)</slogan>', response.content, re.DOTALL | re.IGNORECASE)
-        if match:
-            slogan = match.group(1).strip()
-
-    return {
-        "slogan_draft": slogan,
-        "internal_feedback": "",
-        "messages": return_msgs,
-    }
-
-
-def art_director_node(state: SwarmState):
-    slogan = state.get("slogan_draft", "")
-    feedback = state.get("feedback", "")
-    g_path = state.get('guidelines_path', 'brand_guidelines.txt')
-    task = state.get("task_prompt", "")
-
-    words = slogan.split()
-    if len(words) > 7:
-        return {
-            "internal_feedback": (
-                f"The slogan '{slogan}' is {len(words)} words long. "
-                "It must be 7 words or shorter. Make it punchier."
-            )
-        }
-
-    try:
-        with open(g_path, 'r', encoding='utf-8') as f:
-            guidelines_text = f.read().strip()
-    except Exception:
-        guidelines_text = "No guidelines file found."
-
-    guidelines_block = (
-        f"<BRAND_CONSTRAINTS>\n{guidelines_text}\n</BRAND_CONSTRAINTS>\n"
-        "WARNING: These constraints are absolute. Never generate elements that violate these rules, "
-        "even if the user asks for them."
-    )
-
-    feedback_block = ""
-    if feedback and "HITL_APPROVED" not in feedback:
-        feedback_block = (
-            f"\n\n<CRITICAL_HUMAN_FEEDBACK>\n{feedback}\n</CRITICAL_HUMAN_FEEDBACK>\n"
-            "WARNING: You MUST apply the feedback above immediately. If the user asks for a color change "
-            "(e.g., 'rose-gold'), you MUST include it and overwrite previous colors."
-        )
-
-    sys_msg = SystemMessage(
-        content=(
-            f"{guidelines_block}"
-            "\n\nYou are an Expert Art Director. Your ONLY job is to write a highly detailed image generation prompt (for Midjourney/FLUX). "
-            "CRITICAL RULE: The image prompt MUST integrate the provided slogan natively into the visual environment. "
-            "You must explicitly state how the text appears (e.g., 'The text \"[SLOGAN]\" is engraved on...'). "
-            "You MUST wrap your final image prompt in `<image_prompt>...</image_prompt>` tags."
-            + feedback_block
-        )
-    )
-    human_msg = HumanMessage(content=f"Task: {task}\n\nApproved Slogan: {slogan}")
-
-    response = llm.invoke([sys_msg, human_msg])
-
-    image_prompt = state.get("image_prompt_draft", "")
-    if response.content:
-        match = re.search(r'<image_prompt>(.*?)</image_prompt>', response.content, re.DOTALL | re.IGNORECASE)
-        if match:
-            image_prompt = match.group(1).strip()
-
-    current_draft = {"slogan": slogan, "image_prompt": image_prompt}
-
-    return {
-        "internal_feedback": "",
-        "feedback": "",
-        "image_prompt_draft": image_prompt,
-        "current_draft": current_draft,
-        "messages": [response],
-    }
-
-
-def reviewer_node(state: SwarmState):
-    task = state.get("task_prompt", "")
-    current_draft = state.get("current_draft", {})
-    revision_count = state.get("revision_count", 0)
-
-    draft_str = (
-        f"Slogan: {current_draft.get('slogan', '')}\n\n"
-        f"Image Prompt: {current_draft.get('image_prompt', '')}"
-    )
-
-    system_message = SystemMessage(
-        content=(
-            "You are the Lead Creative Director. Review the draft. "
-            "Does it contain a strong slogan AND a highly detailed image prompt with "
-            "lighting/camera instructions? If yes, output exactly 'APPROVED'. "
-            "If it is missing details, provide brief feedback."
-        )
-    )
-    human_message = HumanMessage(content=f"Task: {task}\n\nCurrent Draft:\n{draft_str}")
-
-    response = llm.invoke([system_message, human_message])
-
-    return {
-        "feedback": response.content,
-        "revision_count": revision_count + 1,
-        "messages": [HumanMessage(content=f"Feedback from Creative Director:\n{response.content}\n\nPlease revise.")],
-    }
-
-
-# ==========================================
-# 6. ROUTING FUNCTIONS  (legacy pipeline)
-# ==========================================
-def route_review(state: SwarmState):
-    feedback = state.get("feedback", "")
-    revision_count = state.get("revision_count", 0)
-    if "approved" in feedback.lower() or revision_count >= 3:
-        return "hitl"
-    return "copywriter"
-
-
 def hitl_node(state: SwarmState):
-    # Pass-through; graph interrupt is declared at compile time.
+    # Graph interrupt is declared at compile time; this is a pass-through.
     return {}
 
 
-def route_hitl(state: SwarmState):
-    feedback = state.get("feedback", "")
-    if "HITL_APPROVED" in feedback:
-        return "exporter"
-    return "copywriter"
-
-
-def route_copywriter(state: SwarmState):
-    msgs = state.get("messages", [])
-    if msgs and hasattr(msgs[-1], 'tool_calls') and msgs[-1].tool_calls:
-        return "tools"
-    return "art_director"
-
-
-def route_art_director(state: SwarmState):
-    if state.get("internal_feedback"):
-        return "copywriter"
-    return "reviewer"
-
-
 # ==========================================
-# 7. EXPORTER NODE  (legacy pipeline)
+# 7. EXPORTER NODE
 # ==========================================
 def export_deliverable_node(state: SwarmState):
     deliverables = state.get("deliverables", {})
     task = state.get("task_prompt", "Project Brief")
     plan = state.get("execution_plan", [])
+    durations = state.get("agent_durations", {})
 
-    slogan = state.get("slogan_draft", "").strip()
-    image_prompt = state.get("image_prompt_draft", "").strip()
-
-    if not deliverables and not slogan and not image_prompt:
-        return {"final_outputs": ["Error: No outputs found to export."]}
+    if not deliverables:
+        return {"final_outputs": ["Error: No agent outputs to export."]}
 
     os.makedirs("outputs", exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    lines = [
+        "# 🎯 CriticAI Swarm Report",
+        f"**Brief:** {task}\n",
+        "---",
+    ]
+    if plan:
+        lines.append("## 🤖 Execution Plan")
+        for i, t in enumerate(plan, 1):
+            lines.append(f"{i}. **[{t.get('agent_role')}]**: {t.get('task_description')}")
+        lines.append("\n---")
+    lines.append("## 📂 Agent Deliverables")
+    for role, content in deliverables.items():
+        dur = f" *(⏱ {durations[role]}s)*" if role in durations else ""
+        lines.append(f"\n### 👤 {role}{dur}")
+        lines.append(content)
+        lines.append("\n---")
 
-    if deliverables:
-        # Dynamic Swarm (Phase 2) format
-        clean_draft = []
-        clean_draft.append(f"# 🎯 CriticAI Project Swarm Report")
-        clean_draft.append(f"**Brief:** {task}\n")
-        clean_draft.append(f"---\n")
-        
-        if plan:
-            clean_draft.append(f"## 🤖 Swarm Execution Plan")
-            for idx, t in enumerate(plan, 1):
-                clean_draft.append(f"{idx}. **[{t.get('agent_role')}]**: {t.get('task_description')}")
-            clean_draft.append(f"\n---\n")
-
-        clean_draft.append(f"## 📂 Agent Deliverables")
-        for role, content in deliverables.items():
-            clean_draft.append(f"\n### 👤 Agent: {role}")
-            clean_draft.append(f"{content}")
-            clean_draft.append(f"\n---\n")
-
-        report_content = "\n".join(clean_draft)
-        filename = f"outputs/project_output_{timestamp}.md"
-    else:
-        # Legacy Creative Pipeline (Phase 1) format
-        report_content = (
-            f"# 🎯 Campaign Output\n\n"
-            f"**Brief:** {task}\n\n"
-            f"---\n\n"
-            f"## ✍️ Slogan\n\n"
-            f"{slogan}\n\n"
-            f"---\n\n"
-            f"## 🖼️ Image Generation Prompt\n\n"
-            f"{image_prompt}\n"
-        )
-        filename = f"outputs/campaign_output_{timestamp}.md"
-
+    filename = f"outputs/project_output_{time.strftime('%Y%m%d_%H%M%S')}.md"
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(report_content)
-
-    print(f"\n[EXPORT] Exported to: {filename}")
-    return {"final_outputs": [f"Successfully exported deliverables to {filename}"]}
+        f.write("\n".join(lines))
+    print(f"[EXPORT] → {filename}")
+    return {"final_outputs": [f"Exported to {filename}"]}
 
 
 # ==========================================
@@ -992,54 +708,18 @@ def export_deliverable_node(state: SwarmState):
 # ─────────────────────────────────────────────────────────────────
 
 workflow = StateGraph(SwarmState)
-
-tool_node = ToolNode(tools_list)
-
-# ── Register nodes ────────────────────────────────────────────────
-workflow.add_node("orchestrator",        orchestrator_node)
-workflow.add_node("worker_subgraph_node", worker_subgraph_node)  # Phase 2: isolated subgraph
-workflow.add_node("copywriter",          copywriter_node)
-workflow.add_node("art_director",        art_director_node)
-workflow.add_node("reviewer",            reviewer_node)
-workflow.add_node("tools",               tool_node)
-workflow.add_node("hitl",               hitl_node)
-workflow.add_node("exporter",           export_deliverable_node)
 workflow.add_node("guardrail",          guardrail_node)
+workflow.add_node("orchestrator",        orchestrator_node)
+workflow.add_node("worker_subgraph_node", worker_subgraph_node)
+workflow.add_node("hitl",                hitl_node)
+workflow.add_node("exporter",            export_deliverable_node)
 
-# ── Phase 2 active wiring ─────────────────────────────────────────
 workflow.set_entry_point("guardrail")
-
-# Guardrail conditional routing: safe goes to orchestrator, flagged goes to hitl
-workflow.add_conditional_edges(
-    "guardrail",
-    route_guardrail,
-    ["orchestrator", "hitl"]
-)
-
-# Fan-out: orchestrator → N parallel worker_subgraph_node invocations via Send
-workflow.add_conditional_edges(
-    "orchestrator",
-    assign_workers,
-    ["worker_subgraph_node"],
-)
-
-# Each worker subgraph finishes → collect at hitl (HITL checkpoint)
+workflow.add_conditional_edges("guardrail",          route_guardrail, ["orchestrator", "hitl"])
+workflow.add_conditional_edges("orchestrator",        assign_workers,  ["worker_subgraph_node"])
 workflow.add_edge("worker_subgraph_node", "hitl")
-
-workflow.add_conditional_edges(
-    "hitl",
-    route_feedback,
-    ["worker_subgraph_node", "orchestrator", "exporter"]
-)
+workflow.add_conditional_edges("hitl",               route_feedback,  ["worker_subgraph_node", "orchestrator", "exporter"])
 workflow.add_edge("exporter", END)
-
-# ── Legacy pipeline wiring (Phase 1 – commented out for Phase 3 re-wiring) ─
-# workflow.add_conditional_edges("copywriter", route_copywriter, {"tools": "tools", "art_director": "art_director"})
-# workflow.add_edge("tools", "copywriter")
-# workflow.add_conditional_edges("art_director", route_art_director, {"copywriter": "copywriter", "reviewer": "reviewer"})
-# workflow.add_conditional_edges("reviewer", route_review, {"hitl": "hitl", "copywriter": "copywriter"})
-# workflow.add_conditional_edges("hitl", route_hitl, {"exporter": "exporter", "copywriter": "copywriter"})
-# workflow.add_edge("exporter", END)
 
 # Initialize SQLite checkpointer
 conn = sqlite3.connect("swarm_memory.sqlite", check_same_thread=False)

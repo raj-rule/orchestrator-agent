@@ -27,9 +27,9 @@ def guardrail_node(state: dict, config: RunnableConfig = None) -> dict:
     
     try:
         # Import dynamically to avoid circular dependency
-        from swarm import get_llm_client
+        from swarm import get_llm_client, invoke_llm_with_timeout
         dyn_llm = get_llm_client(config, is_orchestrator=False)
-        response = dyn_llm.invoke(messages)
+        response = invoke_llm_with_timeout(dyn_llm, messages, timeout_seconds=30.0)
         result = response.content.strip().upper()
         
         # Check if model returned FLAGGED

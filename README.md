@@ -1,96 +1,103 @@
-# 🤖 CriticAI: Multi-Agent LLM Orchestration Swarm
+# 🤖 CriticAI: Secure Multi-Agent Orchestration Swarm
 
-**CriticAI** is a premium, state-of-the-art multi-agent workflow system built using **FastAPI**, **LangGraph**, and **React**. It automates complex product launches, campaign setups, and engineering tasks by orchestrating an elite AI "swarm" that collaborates, works in parallel, gathers human feedback, and executes tasks.
-
-Recruiters and developers can select their preferred LLM provider (**Groq**, **Gemini**, or **OpenRouter**) and securely configure keys directly within the premium dashboard.
+**CriticAI** is a premium, secure multi-agent workflow orchestration system designed to automate complex, multi-stage campaigns, technical plans, and content generation. Built using **FastAPI**, **LangGraph**, and **React (Vite)**, it deploys an elite swarm of autonomous AI agents that collaborate, execute tasks in parallel, review each other's deliverables, and incorporate Human-in-the-Loop (HITL) feedback.
 
 ---
 
-## 🎨 Premium Features
+## 🎨 Architecture & Workflow
 
-- 🧠 **Dynamic Swarm Orchestrator**: Uses a Llama-3.3-70B model to break down any user brief into a structured multi-agent project plan.
-- ⚡ **Parallel Worker Dispatch**: Spawns multiple specialized agents (e.g., Marketing Strategists, Copywriters, AI/ML Architects) to execute tasks in parallel using LangGraph's Send API.
-- 💬 **Human-in-the-Loop (HITL) Collaboration**: Automatically halts execution and awaits feedback. Users can request **Global Revisions** (re-triggering the orchestrator) or **Targeted Revisions** (targeting a specific agent's canvas).
-- 🔒 **Secure Local Settings**: Stores API keys securely in the browser's `localStorage` (never written to disk or sent to remote databases) and passes them to the local server via custom HTTP headers.
-- 📂 **Structured Markdown Exporter**: Compiles and exports all agent outputs into a beautifully formatted, consolidated Markdown project report in the `outputs/` folder.
-
----
-
-## 🏗️ Architecture & Data Flow
-
-```mermaid
-sequenceDiagram
-    participant User as Recruiter/User
-    participant UI as React Frontend (Vite)
-    participant Server as FastAPI Backend
-    participant Swarm as LangGraph State Engine
-    participant LLM as Groq / Gemini / OpenRouter
-
-    User->>UI: Input API Keys in Settings Modal
-    UI->>UI: Save keys in browser LocalStorage
-    User->>UI: Enter project brief
-    UI->>Server: POST /api/start (with keys in custom HTTP Headers)
-    Server->>Swarm: Instantiate StateGraph with thread session
-    Swarm->>LLM: Groq TPM Orchestrator compiles execution plan
-    Swarm->>Swarm: Parallel Send() calls spawn specialized workers
-    Swarm->>LLM: Workers generate deliverables in parallel
-    Swarm->>Server: Handoff to HITL state (Graph Interrupt)
-    Server->>UI: Update dashboard with deliverables & execution status
-    User->>UI: Review specific agent or request global revisions
 ```
+[ User Prompt / Attached Files ]
+               │
+               ▼
+   [ 🛡️ Security Guardrails ] ─────────► (Blocks Prompt Injections & Harmful Inputs)
+               │ (Passed)
+               ▼
+   [ 🧠 Orchestrator Agent ] ─────────► (Decomposes task into a structured project plan)
+               │
+      ┌────────┼────────┐
+      ▼        ▼        ▼  (Parallel Send API Worker Dispatch)
+   [Worker] [Worker] [Worker] ────────► (Copywriter, GTM Strategist, AI Architect, etc.)
+      │        │        │
+      └────────┼────────┘
+               ▼
+   [ 🔬 Critic / Review Loop ] ───────► (Validates deliverables; triggers up to 2 revisions)
+               │ (Halts)
+               ▼
+   [ 💬 HITL Collaboration ] ────────► (Awaits user approval, targeted or global revisions)
+               │ (Approved)
+               ▼
+   [ 📁 Final Deliverables ] ────────► (Consolidated Markdown report compiled locally)
+```
+
+---
+
+## 🛡️ Security & Privacy Hardening
+
+CriticAI is designed with recruiter-facing and enterprise privacy standards:
+1. **Cryptographic Session Signing**: All chat session IDs are signed server-side using **HMAC-SHA256** with a secret key (`CRITICAI_SESSION_SECRET`). This prevents session guessing, tampering, or state hijacking by external parties.
+2. **Backend Authentication Token**: An optional backend protection token (`CRITICAI_BACKEND_TOKEN`) can be set. When enabled, the backend validates an `X-Backend-Token` header for all REST endpoints and Socket.IO events, blocking unauthorized access.
+3. **Secure Local Credentials**: LLM API keys are stored solely in the user's browser `localStorage`. They are transmitted directly to the local FastAPI server via custom headers and are never written to disk or sent to a remote database.
 
 ---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
-Make sure you have the following installed on your machine:
-- **Python 3.10+** (Python 3.14 recommended)
-- **Node.js & NPM**
+- **Python 3.10+** (Python 3.11 recommended)
+- **Node.js 18+** & **NPM**
+- **Docker & Docker Compose** (Optional, for containerized run)
 
-### Fast Bootstrapping (Windows)
-We have provided a unified startup script. Simply double-click **`start.bat`** in the root of the project. The script will:
-1. Recreate/repair the Python virtual environment if missing or broken.
-2. Install all required backend packages (`fastapi`, `langgraph`, `langchain-groq`, etc.).
-3. Check and install frontend packages (`npm install` inside `swarm-ui/`).
-4. Concurrently spin up the FastAPI server and the Vite React server.
+### 1. Environment Configuration
+Create a `.env` file in the project root by copying the template:
+```bash
+cp .env.example .env
+```
+Open `.env` and fill in your keys:
+```env
+# Get your API key from https://openrouter.ai/keys
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 
-Once booted, open your browser to **`http://localhost:5173`** to access the dashboard.
+# Optional: Add Tavily API Key for web search capabilities
+TAVILY_API_KEY=your_tavily_api_key_here
+```
+
+### 2. Fast Bootstrapping (Windows)
+Double-click the **`start.bat`** script in the root directory. The script automatically:
+1. Recreates/repairs the Python virtual environment (`venv`) if missing.
+2. Installs backend dependencies.
+3. Installs frontend packages (`npm install` inside `swarm-ui/`).
+4. Starts both the FastAPI server (`http://localhost:8000`) and the Vite frontend (`http://localhost:5173`) concurrently.
 
 ---
 
-## 🔑 LLM API Key Configuration
-1. Click the **Cog (Settings) Icon** in the sidebar.
-2. Choose your default LLM Provider:
-   - **Groq**: Uses `llama-3.3-70b-versatile` for orchestrator, `llama-3.1-8b-instant` for workers.
-   - **Gemini**: Uses `gemini-1.5-flash` for fast, lightweight performance.
-   - **OpenRouter**: Accesses free-tier models such as Llama-3-8b and Gemini-2.0-Flash.
-3. Paste your API key, click **Save Settings**, and you're ready to run!
+## 🧪 Testing and Verification
+
+CriticAI features a unit test suite that runs in a fully self-contained environment (all LLMs are mocked out-of-the-box):
+
+### Run Backend Test Suite
+Ensure the virtual environment is active, then run:
+```bash
+pytest
+```
+*Note: All tests pass without requiring active LLM API keys.*
 
 ---
 
-## 📂 Project Structure
+## 🐳 Docker Deployment
 
+To launch the full backend (FastAPI + WebSocket server) and frontend (Nginx hosting React bundle) using Docker Compose:
+
+```bash
+# Build and run containers
+docker-compose up --build
 ```
-CriticAI/
-│
-├── server.py              # FastAPI server (API endpoints, header extraction)
-├── swarm.py               # LangGraph swarm engine & dynamic LLM factory
-├── guardrails.py          # Input safety & prompt injection validation filters
-├── _test_orchestrator.py  # Local smoke test verification script
-├── requirements.txt       # Python backend dependencies
-├── start.bat              # Out-of-the-box Windows runner script
-│
-├── swarm-ui/              # Vite + React Frontend
-│   ├── package.json       # React dependencies (framer-motion, lucide-react)
-│   ├── tailwind.config.js # Tailwind styling config
-│   └── src/
-│       ├── App.jsx        # Premium dashboard logic & Settings panel
-│       └── App.css        # Custom CSS scrollbar and scroll logic
-```
+Once booted:
+- Access the frontend dashboard at: **`http://localhost:5173`**
+- Access the FastAPI Swagger documentation at: **`http://localhost:8000/docs`**
 
 ---
 
 ## 🛠️ Technology Stack
-- **Backend**: FastAPI, Uvicorn, LangGraph, LangChain Core/OpenAI/Groq/Google GenAI, SQLite (checkpoint saver).
-- **Frontend**: React 19, Vite, TailwindCSS, Framer Motion (animations), Lucide React (icons).
+- **Backend**: FastAPI, Uvicorn, LangGraph (StateGraph checkpointer), LangChain (OpenAI/OpenRouter bindings), SQLite (persistent states), Python-SocketIO.
+- **Frontend**: React 18, Vite, TailwindCSS, Framer Motion (animations), Lucide React (icons), Socket.io Client.

@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock
 from guardrails import guardrail_node, route_guardrail
 
 def test_guardrail_safe_prompt(mock_get_llm_client):
@@ -25,3 +26,13 @@ def test_route_guardrail():
     assert route_guardrail({"guardrail_status": "flagged"}) == "hitl"
     assert route_guardrail({"guardrail_status": "safe"}) == "orchestrator"
     assert route_guardrail({}) == "orchestrator"
+
+def test_guardrail_exception_fallback(mock_get_llm_client):
+    # Mock LLM client raises an exception
+    mock_get_llm_client.invoke = MagicMock(side_effect=Exception("API connection timeout"))
+    
+    state = {"task_prompt": "Standard user prompt"}
+    # Should catch the exception and fall back to returning safe status
+    result = guardrail_node(state)
+    
+    assert result["guardrail_status"] == "safe"

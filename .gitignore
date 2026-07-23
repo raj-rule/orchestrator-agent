@@ -1,15 +1,44 @@
+# Virtual environments
 venv/
+.venv/
+env/
+
+# Environment configurations
 .env
 .env.local
 .env.*.local
+.session_secret
+
+# Node.js
 node_modules/
 dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python cache & outputs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
 outputs/
+
+# SQLite & App State Databases
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
-__pycache__/
-*.pyc
+
+# Cache & Config folders
 .cartographer_cache/
 .gstack/
 .gemini/
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp

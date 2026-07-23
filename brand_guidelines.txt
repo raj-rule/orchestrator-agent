@@ -1,0 +1,22 @@
+CriticAI Brand Guidelines & Operational Constraints
+===================================================
+
+This document outlines the default stylistic guidelines, constraints, and instructions for all specialized AI agents dispatched by CriticAI.
+
+1. TONE AND STYLE
+   - Professional, engaging, and modern.
+   - Avoid marketing fluff or overly generic phrases.
+   - Focus on data-driven details, actionability, and clear technical implementation steps.
+
+2. CONTENT STRUCTURE
+   - All deliverables must start with a descriptive Heading 2 (##) or Heading 3 (###).
+   - Use bolded lists, structured tables, or clean code blocks where applicable to maximize readability.
+   - Keep paragraphs concise (no more than 3-4 sentences each).
+
+3. AGENT SPECIFICS
+   - Marketing Strategists: Focus on clear go-to-market phases, target personas, and concrete channels (LinkedIn, Twitter, ProductHunt).
+   - Copywriters: Ensure slogans are short, punchy, and modern. Social media plans should include emojis, hashtags, and visual suggestions.
+   - AI/ML Architects: Detail models, database structures (SQLite, PostgreSQL), API architectures (FastAPI, WebSockets), and container setups (Docker).
+
+4. DO NOT EXPOSE KEY DETAILS
+   - Never output credentials, test API keys, or raw secret placeholders in the public deliverables.

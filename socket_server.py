@@ -20,12 +20,14 @@ sio = socketio.AsyncServer(
     engineio_logger=False,
 )
 
-socket_app = socketio.ASGIApp(sio, socketio_path="/ws/socket.io")
+socket_app = socketio.ASGIApp(sio, socketio_path="")
 
 
 async def emit_to_session(session_id: str, event: str, data: dict) -> None:
     """Emit a named event to all sockets that have joined the session room."""
-    await sio.emit(event, data, room=session_id)
+    # ponytail: room is always raw UUID — strip HMAC suffix if present
+    room = session_id.rsplit(".", 1)[0] if "." in session_id else session_id
+    await sio.emit(event, data, room=room)
 
 
 @sio.event
@@ -41,8 +43,11 @@ async def disconnect(sid):
 @sio.event
 async def join_session(sid, data):
     """Client sends {session_id} to subscribe to that session's events."""
-    session_id = data.get("session_id", "")
-    if session_id:
-        await sio.enter_room(sid, session_id)
-        print(f"[WS] {sid} joined room: {session_id}")
-        await sio.emit("joined", {"session_id": session_id}, to=sid)
+    session_id = data.get("session_id", "").strip()
+    if not session_id:
+        return
+    # ponytail: strip HMAC suffix if present so room name is always the raw UUID
+    raw_id = session_id.rsplit(".", 1)[0] if "." in session_id else session_id
+    await sio.enter_room(sid, raw_id)
+    print(f"[WS] {sid} joined room: {raw_id}")
+    await sio.emit("joined", {"session_id": session_id}, to=sid)
