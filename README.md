@@ -34,7 +34,7 @@
 
 ## 🛡️ Security & Privacy Hardening
 
-CriticAI is designed with recruiter-facing and enterprise privacy standards:
+CriticAI is designed with privacy standards:
 1. **Cryptographic Session Signing**: All chat session IDs are signed server-side using **HMAC-SHA256** with a secret key (`CRITICAI_SESSION_SECRET`). This prevents session guessing, tampering, or state hijacking by external parties.
 2. **Backend Authentication Token**: An optional backend protection token (`CRITICAI_BACKEND_TOKEN`) can be set. When enabled, the backend validates an `X-Backend-Token` header for all REST endpoints and Socket.IO events, blocking unauthorized access.
 3. **Secure Local Credentials**: LLM API keys are stored solely in the user's browser `localStorage`. They are transmitted directly to the local FastAPI server via custom headers and are never written to disk or sent to a remote database.
