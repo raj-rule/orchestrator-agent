@@ -382,22 +382,47 @@ export default function App() {
       setIsProcessing(false);
       if (data.agent_statuses) setAgentStatuses(data.agent_statuses);
       if (data.agent_durations) setAgentDurations(data.agent_durations);
+
+      if (data.conversational_reply) {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: 'ai',
+            type: 'text',
+            content: data.conversational_reply,
+          }
+        ]);
+        return;
+      }
+
       const newDeliverables = data.deliverables;
       const deliverables = newDeliverables && Object.keys(newDeliverables).length > 0
         ? newDeliverables
         : {};
       const executionPlan = data.execution_plan || [];
-      setMessages(prev => [
-        ...prev,
-        {
+
+      setMessages(prev => {
+        const nextMsgs = [...prev];
+        if (data.status === 'completed') {
+          nextMsgs.push({
+            id: crypto.randomUUID(),
+            role: 'ai',
+            type: 'text',
+            content: '✅ **Campaign approved and finalized!** All deliverables have been successfully consolidated and exported to the local `outputs/` folder.',
+          });
+        }
+        nextMsgs.push({
           id: crypto.randomUUID(),
           role: 'ai',
           type: 'draft',
           content: { deliverables, executionPlan },
           isAwaitingFeedback: data.status !== 'completed',
           isFinal: data.status === 'completed',
-        }
-      ]);
+        });
+        return nextMsgs;
+      });
+
       setLiveAgents(prev => prev.map(a => ({ ...a, status: 'done' })));
     });
 
@@ -685,17 +710,6 @@ export default function App() {
     };
     setMessages(prev => [...prev, userMsg]);
 
-    if (isApproved) {
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(),
-        role: 'ai',
-        type: 'text',
-        content: 'Campaign finalized successfully! All assets have been exported.',
-      }]);
-      setActiveView('main');
-      return;
-    }
-
     if (!socketRef.current?.connected) {
       setMessages(prev => [
         ...prev,
@@ -710,7 +724,9 @@ export default function App() {
     }
 
     setIsProcessing(true);
-    setActiveView('main');
+    if (!targetAgent) {
+      setActiveView('main');
+    }
     setLiveAgents([]);
     setTerminalVisible(true);
 
@@ -1260,6 +1276,20 @@ export default function App() {
                  {(() => {
                    const content = latestDeliverables[activeView] || "No content generated yet.";
                    const isAgentError = content.includes("Agent Error") || content.includes("⚠️");
+                   const isRevising = isProcessing && (agentStatuses[activeView] === 'working' || agentStatuses[activeView] === 'reviewing');
+
+                   if (isRevising) {
+                     return (
+                       <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
+                         <div className="w-10 h-10 rounded-full border-2 border-emerald-500/20 border-t-emerald-500 animate-spin" />
+                         <div>
+                           <h4 className="text-zinc-200 text-sm font-semibold">{activeView} is revising...</h4>
+                           <p className="text-xs text-zinc-500 mt-1 max-w-sm">Applying your feedback to refine the deliverable. This will take a moment.</p>
+                         </div>
+                       </div>
+                     );
+                   }
+
                    if (isAgentError) {
                      return (
                        <div className="bg-amber-950/20 border border-amber-500/20 rounded-2xl p-6 mb-8 flex gap-4">

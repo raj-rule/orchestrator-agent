@@ -566,15 +566,71 @@ async def send_feedback(sid, data: dict):
         })
         return
 
-    if not state_snapshot.next:
-        await emit_to_session(verified_session_id, "swarm_complete", {
-            "status":          "completed",
-            "deliverables":    state_snapshot.values.get("deliverables", {}),
-            "execution_plan":  state_snapshot.values.get("execution_plan", []),
-            "agent_statuses":  state_snapshot.values.get("agent_statuses", {}),
-            "agent_durations": state_snapshot.values.get("agent_durations", {}),
-        })
-        return
+    is_completed = not state_snapshot.next
+    intent = "REVISION"
+    
+    if is_completed:
+        intent = "CONVERSATIONAL"
+    elif fb_type == "global":
+        intent_system = """You are an intent classifier for a multi-agent workspace.
+Analyze the user's message.
+Classify the user's intent into one of the following:
+1. "CONVERSATIONAL": The user is asking a question about the outputs, requesting an explanation, asking for advice, saying thank you, or having a general chat.
+2. "REVISION": The user wants to modify, rewrite, change, expand, or revise the campaign deliverables, or change the execution plan/hire new agents.
+
+Respond with exactly one word: CONVERSATIONAL or REVISION.
+Do not explain your reasoning."""
+        try:
+            classifier_client = get_llm_client(config, is_orchestrator=True)
+            messages = [
+                SystemMessage(content=intent_system),
+                HumanMessage(content=f"User Message: {feedback_text}\n\nDeliverables generated: {list(state_snapshot.values.get('deliverables', {}).keys())}")
+            ]
+            intent_res = invoke_llm_with_timeout(classifier_client, messages, timeout_seconds=15.0)
+            intent = intent_res.content.strip().upper()
+        except Exception:
+            intent = "REVISION"
+
+    if intent == "CONVERSATIONAL":
+        reply_system = """You are the Lead Critic & Orchestrator of CriticAI.
+The user is asking a follow-up question or chatting about the campaign deliverables.
+Answer their question directly and professionally based on the project brief, the plan, and the deliverables.
+Be helpful, engaging, and clear. Format your response in clean Markdown.
+
+Project Brief:
+{user_brief}
+
+Execution Plan:
+{execution_plan}
+
+Agent Deliverables:
+{deliverables}
+"""
+        try:
+            client = get_llm_client(config, is_orchestrator=False)
+            reply_messages = [
+                SystemMessage(content=reply_system.format(
+                    user_brief=state_snapshot.values.get("user_brief", ""),
+                    execution_plan=state_snapshot.values.get("execution_plan", []),
+                    deliverables=state_snapshot.values.get("deliverables", {})
+                )),
+                HumanMessage(content=feedback_text)
+            ]
+            reply_res = invoke_llm_with_timeout(client, reply_messages, timeout_seconds=45.0)
+            reply_content = reply_res.content.strip()
+            
+            await emit_to_session(verified_session_id, "swarm_complete", {
+                "status": "completed" if is_completed else "pending_review",
+                "deliverables": state_snapshot.values.get("deliverables", {}),
+                "execution_plan": state_snapshot.values.get("execution_plan", []),
+                "agent_statuses": state_snapshot.values.get("agent_statuses", {}),
+                "agent_durations": state_snapshot.values.get("agent_durations", {}),
+                "conversational_reply": reply_content
+            })
+            return
+        except Exception as e:
+            await emit_to_session(verified_session_id, "swarm_error", {"message": f"Conversational reply failed: {str(e)}"})
+            return
 
     if user_feedback.strip().lower() in ["approve", "proceed", "yes", "y", "approved"]:
         swarm_app.update_state(config, {"feedback": "HITL_APPROVED", "feedback_type": "approved"})
