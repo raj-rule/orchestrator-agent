@@ -1042,13 +1042,37 @@ export default function App() {
 
                             {/* Text Response */}
                             {msg.type === 'text' && (
-                              <div className="bg-zinc-900 border border-white/10 p-5 rounded-xl shadow-md mt-1">
-                                <div className="prose prose-invert prose-zinc max-w-none prose-headings:font-semibold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:text-zinc-300 prose-p:leading-relaxed prose-a:text-emerald-400 prose-li:text-zinc-300 prose-strong:text-zinc-100">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                    {msg.content}
-                                  </ReactMarkdown>
-                                </div>
-                              </div>
+                              (() => {
+                                const contentStr = String(msg.content || "");
+                                const isError = contentStr.startsWith("System Error") || contentStr.includes("⚠️") || contentStr.toLowerCase().includes("error");
+                                if (isError) {
+                                  return (
+                                    <div className="bg-rose-950/20 border border-rose-500/30 p-5 rounded-xl shadow-md mt-1 flex gap-4">
+                                      <div className="w-10 h-10 shrink-0 rounded-full bg-rose-500/10 flex items-center justify-center border border-rose-500/20 mt-1">
+                                        <AlertTriangle className="text-rose-450 animate-pulse" size={20} />
+                                      </div>
+                                      <div className="flex-1 space-y-2">
+                                        <h4 className="text-sm font-semibold text-rose-300">Swarm Execution Stopped</h4>
+                                        <div className="text-sm text-zinc-300 leading-relaxed font-mono bg-black/40 p-3 rounded-lg border border-white/5 whitespace-pre-wrap break-all">
+                                          {msg.content}
+                                        </div>
+                                        <p className="text-xs text-zinc-500">
+                                          💡 **Troubleshooting Tips:** Check your OpenRouter API Key configuration, verify model rate limits, or check your internet connection.
+                                        </p>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div className="bg-zinc-900 border border-white/10 p-5 rounded-xl shadow-md mt-1">
+                                    <div className="prose prose-invert prose-zinc max-w-none prose-headings:font-semibold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:text-zinc-300 prose-p:leading-relaxed prose-a:text-emerald-400 prose-li:text-zinc-300 prose-strong:text-zinc-100">
+                                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {msg.content}
+                                      </ReactMarkdown>
+                                    </div>
+                                  </div>
+                                );
+                              })()
                             )}
                           </div>
                         )}
@@ -1233,11 +1257,38 @@ export default function App() {
                 
                 <hr className="border-white/10 my-8" />
                 
-                <div className="prose prose-invert prose-zinc max-w-none prose-headings:font-semibold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:text-zinc-300 prose-p:leading-relaxed prose-a:text-emerald-400 prose-li:text-zinc-300 prose-strong:text-zinc-100">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {latestDeliverables[activeView] || "No content generated yet."}
-                  </ReactMarkdown>
-                </div>
+                 {(() => {
+                   const content = latestDeliverables[activeView] || "No content generated yet.";
+                   const isAgentError = content.includes("Agent Error") || content.includes("⚠️");
+                   if (isAgentError) {
+                     return (
+                       <div className="bg-amber-950/20 border border-amber-500/20 rounded-2xl p-6 mb-8 flex gap-4">
+                         <div className="w-10 h-10 shrink-0 rounded-full bg-amber-500/10 flex items-center justify-center border border-amber-500/20 mt-1">
+                           <AlertTriangle className="text-amber-400" size={20} />
+                         </div>
+                         <div className="space-y-3">
+                           <h3 className="text-sm font-semibold text-amber-300 uppercase tracking-wider">Agent Execution Failed</h3>
+                           <p className="text-sm text-zinc-350 leading-relaxed">
+                             The agent <strong>{activeView}</strong> encountered an error while executing its assignment.
+                           </p>
+                           <div className="bg-black/40 border border-white/5 rounded-xl p-4 font-mono text-xs text-amber-250 break-words whitespace-pre-wrap leading-relaxed shadow-inner">
+                             {content}
+                           </div>
+                           <p className="text-xs text-zinc-500">
+                             👉 **How to fix:** Type a targeted revision prompt in the feedback box below to instruct the agent to retry, or verify your OpenRouter key and limits in Settings.
+                           </p>
+                         </div>
+                       </div>
+                     );
+                   }
+                   return (
+                     <div className="prose prose-invert prose-zinc max-w-none prose-headings:font-semibold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:text-zinc-300 prose-p:leading-relaxed prose-a:text-emerald-400 prose-li:text-zinc-300 prose-strong:text-zinc-100">
+                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                         {content}
+                       </ReactMarkdown>
+                     </div>
+                   );
+                 })()}
               </div>
             </div>
 
