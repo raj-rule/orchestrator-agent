@@ -1,0 +1,91 @@
+<svg width="900" height="520" viewBox="0 0 900 520" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .bg { fill: #09090b; }
+    .title { font-family: system-ui, -apple-system, sans-serif; font-size: 18px; font-weight: 700; fill: #f4f4f5; letter-spacing: 1px; }
+    .subtitle { font-family: system-ui, -apple-system, sans-serif; font-size: 12px; fill: #a1a1aa; }
+    .node-title { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 600; fill: #fafafa; }
+    .node-desc { font-family: system-ui, -apple-system, sans-serif; font-size: 10px; fill: #a1a1aa; }
+    .badge { font-family: system-ui, -apple-system, sans-serif; font-size: 9px; font-weight: 700; fill: #10b981; }
+    .arrow { stroke: #3f3f46; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .arrow-green { stroke: #10b981; stroke-width: 2; stroke-linecap: round; }
+    .arrow-red { stroke: #f43f5e; stroke-width: 2; stroke-dasharray: 4 4; }
+  </style>
+
+  <!-- Background -->
+  <rect width="900" height="520" rx="16" class="bg" stroke="#27272a" stroke-width="2"/>
+  
+  <!-- Title -->
+  <text x="450" y="36" text-anchor="middle" class="title">CRITICAI SYSTEM ARCHITECTURE</text>
+  <text x="450" y="56" text-anchor="middle" class="subtitle">Multi-Agent Workflow Orchestration &amp; Isolated Critic Loops</text>
+
+  <!-- Connectors -->
+  <path d="M 170 140 L 230 140" class="arrow" />
+  <path d="M 370 140 L 430 140" class="arrow-green" />
+  <path d="M 300 175 L 300 230" class="arrow-red" />
+  
+  <!-- Parallel Worker Fan-Out Lines -->
+  <path d="M 550 140 L 610 90" class="arrow-green" />
+  <path d="M 550 140 L 610 140" class="arrow-green" />
+  <path d="M 550 140 L 610 190" class="arrow-green" />
+  
+  <!-- Worker to HITL Lines -->
+  <path d="M 760 90 L 800 140" class="arrow" />
+  <path d="M 760 140 L 800 140" class="arrow" />
+  <path d="M 760 190 L 800 140" class="arrow" />
+  
+  <!-- HITL to Exporter Line -->
+  <path d="M 830 180 L 830 350 L 490 350" class="arrow-green" />
+
+  <!-- Node 1: User Brief & Document Input -->
+  <rect x="30" y="105" width="140" height="70" rx="12" fill="#18181b" stroke="#3f3f46" stroke-width="1.5"/>
+  <text x="100" y="135" text-anchor="middle" class="node-title">1. User Brief</text>
+  <text x="100" y="153" text-anchor="middle" class="node-desc">Prompt &amp; PDF/TXT Upload</text>
+
+  <!-- Node 2: Input Guardrail Node -->
+  <rect x="230" y="105" width="140" height="70" rx="12" fill="#18181b" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="300" y="135" text-anchor="middle" class="node-title">2. Input Guardrail</text>
+  <text x="300" y="153" text-anchor="middle" class="node-desc">Prompt Injection Check</text>
+
+  <!-- Flagged HITL Alert Node -->
+  <rect x="230" y="230" width="140" height="55" rx="10" fill="#270f12" stroke="#f43f5e" stroke-width="1.5"/>
+  <text x="300" y="255" text-anchor="middle" class="node-title" fill="#f43f5e">Security Alert (HITL)</text>
+  <text x="300" y="270" text-anchor="middle" class="node-desc">Abort &amp; Flag Request</text>
+
+  <!-- Node 3: Orchestrator Plan Generator -->
+  <rect x="430" y="105" width="140" height="70" rx="12" fill="#022c22" stroke="#10b981" stroke-width="2"/>
+  <text x="500" y="135" text-anchor="middle" class="node-title" fill="#10b981">3. Orchestrator</text>
+  <text x="500" y="153" text-anchor="middle" class="node-desc">Dynamic Worker Fan-Out</text>
+
+  <!-- Subgraph Worker 1: Backend Security Engineer -->
+  <rect x="610" y="65" width="150" height="50" rx="8" fill="#18181b" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="685" y="88" text-anchor="middle" class="node-title">Security Engineer</text>
+  <text x="685" y="102" text-anchor="middle" class="node-desc">Worker ↔ Critic Loop</text>
+
+  <!-- Subgraph Worker 2: B2B Copywriter -->
+  <rect x="610" y="115" width="150" height="50" rx="8" fill="#18181b" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="685" y="138" text-anchor="middle" class="node-title">B2B Copywriter</text>
+  <text x="685" y="152" text-anchor="middle" class="node-desc">Worker ↔ Critic Loop</text>
+
+  <!-- Subgraph Worker 3: QA Engineer -->
+  <rect x="610" y="165" width="150" height="50" rx="8" fill="#18181b" stroke="#ec4899" stroke-width="1.5"/>
+  <text x="685" y="188" text-anchor="middle" class="node-title">QA &amp; Test Engineer</text>
+  <text x="685" y="202" text-anchor="middle" class="node-desc">Worker ↔ Critic Loop</text>
+
+  <!-- Node 4: HITL State Router -->
+  <rect x="780" y="105" width="100" height="70" rx="12" fill="#18181b" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="830" y="135" text-anchor="middle" class="node-title" fill="#c084fc">4. HITL Router</text>
+  <text x="830" y="153" text-anchor="middle" class="node-desc">Approve / Revise</text>
+
+  <!-- Node 5: Exporter Node & Persistence -->
+  <rect x="350" y="320" width="280" height="65" rx="12" fill="#0f172a" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="490" y="348" text-anchor="middle" class="node-title" fill="#38bdf8">5. SQLite Persistence &amp; Exporter</text>
+  <text x="490" y="366" text-anchor="middle" class="node-desc">SqliteSaver Checkpoint &amp; Markdown Report Generator</text>
+
+  <!-- Key Highlights Panel -->
+  <rect x="30" y="410" width="840" height="80" rx="12" fill="#121215" stroke="#27272a" stroke-width="1"/>
+  <text x="50" y="435" class="node-title" fill="#10b981">SYSTEM SPECIFICATIONS &amp; ISOLATION GUARANTEES:</text>
+  <text x="50" y="455" class="node-desc" fill="#d4d4d8">• LangGraph StateGraph compiled with interrupt_before=['hitl'] for safe Human Approval Pause.</text>
+  <text x="50" y="472" class="node-desc" fill="#d4d4d8">• Isolated Worker Subgraphs prevent key collisions on parallel state writes via custom dict reducers.</text>
+  <text x="500" y="455" class="node-desc" fill="#d4d4d8">• HMAC-SHA256 session signature verification on all session IDs.</text>
+  <text x="500" y="472" class="node-desc" fill="#d4d4d8">• Automatic execution timeouts (45s) &amp; exponential backoff retries.</text>
+</svg>
